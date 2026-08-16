@@ -107,14 +107,14 @@ internal fun Composer(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = DsSpacing.medium, vertical = DsSpacing.small)
+            .padding(horizontal = DsSpacing.medium, vertical = DsSpacing.xsmall)
             .animateContentSize(),
         shape = DsShapes.composer,
         color = colors.composerCard,
         border = BorderStroke(1.dp, colors.borderL1),
     ) {
         Column(
-            Modifier.padding(DsSpacing.medium),
+            Modifier.padding(horizontal = DsSpacing.medium, vertical = DsSpacing.xsmall),
             verticalArrangement = Arrangement.spacedBy(DsSpacing.small),
         ) {
             TextField(

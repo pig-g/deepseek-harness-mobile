@@ -227,6 +227,10 @@ fun QuestionsPanel(
         shadowElevation = 2.dp,
     ) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // The takeover dock sits at the bottom of the chat under the composer on a phone, so it
+            // shares the screen with the keyboard and has no room of its own. Unbounded, a tall set
+            // of questions would push the action row below the fold and leave the user unable to
+            // select, submit or cancel. Bounding the scrolling body keeps those actions reachable.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     stringResource(R.string.questions_title) + " ${page + 1}/${questions.size}",
@@ -234,56 +238,65 @@ fun QuestionsPanel(
                     color = colors.labelSecondary,
                 )
             }
-            current.header?.let {
-                Text(it, style = DsType.std14Strong, color = colors.labelPrimary)
-            }
-            Text(current.question, style = DsType.std14, color = colors.labelPrimary)
-            current.detail?.let {
-                Text(it, style = DsType.small13, color = colors.labelTertiary)
-            }
 
-            current.options.forEach { option ->
-                val isSelected = option.label in selected
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            selected = if (current.multiSelect) {
-                                if (isSelected) selected - option.label else selected + option.label
-                            } else {
-                                listOf(option.label)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 240.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                current.header?.let {
+                    Text(it, style = DsType.std14Strong, color = colors.labelPrimary)
+                }
+                Text(current.question, style = DsType.std14, color = colors.labelPrimary)
+                current.detail?.let {
+                    Text(it, style = DsType.small13, color = colors.labelTertiary)
+                }
+
+                current.options.forEach { option ->
+                    val isSelected = option.label in selected
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                selected = if (current.multiSelect) {
+                                    if (isSelected) selected - option.label else selected + option.label
+                                } else {
+                                    listOf(option.label)
+                                }
+                            },
+                        shape = DsShapes.menu,
+                        color = if (isSelected) colors.accentTertiary else colors.bgModulePlatform,
+                        border = if (isSelected) BorderStroke(1.dp, colors.accent) else null,
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                            Text(
+                                option.label,
+                                style = DsType.std14,
+                                color = if (isSelected) colors.accent else colors.labelPrimary,
+                            )
+                            option.description?.let {
+                                Text(it, style = DsType.caption11, color = colors.labelTertiary)
                             }
-                        },
-                    shape = DsShapes.menu,
-                    color = if (isSelected) colors.accentTertiary else colors.bgModulePlatform,
-                    border = if (isSelected) BorderStroke(1.dp, colors.accent) else null,
-                ) {
-                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                        Text(
-                            option.label,
-                            style = DsType.std14,
-                            color = if (isSelected) colors.accent else colors.labelPrimary,
-                        )
-                        option.description?.let {
-                            Text(it, style = DsType.caption11, color = colors.labelTertiary)
                         }
                     }
                 }
-            }
 
-            TextField(
-                value = custom,
-                onValueChange = { custom = it },
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text(stringResource(R.string.questions_other), style = DsType.std14) },
-                singleLine = false,
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = colors.bgLayer1,
-                    unfocusedContainerColor = colors.bgLayer1,
-                    focusedIndicatorColor = colors.accent,
-                    unfocusedIndicatorColor = colors.borderL2,
-                ),
-            )
+                TextField(
+                    value = custom,
+                    onValueChange = { custom = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text(stringResource(R.string.questions_other), style = DsType.std14) },
+                    singleLine = false,
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = colors.bgLayer1,
+                        unfocusedContainerColor = colors.bgLayer1,
+                        focusedIndicatorColor = colors.accent,
+                        unfocusedIndicatorColor = colors.borderL2,
+                    ),
+                )
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 DsButton(
@@ -336,8 +349,17 @@ private fun currentAnswer(
     item: QuestionItem,
     selected: List<String>,
     custom: String,
-): QuestionAnswer = QuestionAnswer(
-    id = item.id,
-    selected = selected,
-    custom = custom.takeIf { it.isNotBlank() },
-)
+): QuestionAnswer {
+    val text = custom.trim()
+    // The harness rejects a single-select answer that carries both a chosen option and a custom
+    // reply (and an empty `custom`), so a single-select "Other…" reply IS the answer: its option
+    // selection is cleared. On a multi-select question the custom text may accompany the chosen
+    // options. Custom text is omitted entirely when blank.
+    val effectiveSelected =
+        if (item.multiSelect || text.isEmpty()) selected else emptyList()
+    return QuestionAnswer(
+        id = item.id,
+        selected = effectiveSelected,
+        custom = text.takeIf { it.isNotBlank() },
+    )
+}

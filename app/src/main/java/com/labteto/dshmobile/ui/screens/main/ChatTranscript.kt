@@ -20,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -38,6 +39,14 @@ import com.labteto.dshmobile.ui.components.EmptyHero
 import com.labteto.dshmobile.ui.components.skeleton
 import com.labteto.dshmobile.ui.theme.DsTheme
 import com.labteto.dshmobile.ui.theme.DsType
+import kotlinx.coroutines.delay
+
+/**
+ * Scroll offset that pins the newest content to the bottom edge of the viewport rather than just
+ * the top of the last message. Used as the `scrollOffset` in LazyListState scrolls — the framework
+ * clamps it to the end of the list, so the tail (not the head) of a long reply is what's shown.
+ */
+private const val BOTTOM_ANCHOR_OFFSET = Int.MAX_VALUE
 
 /**
  * How close to the top a reader must get before the next page is fetched.
@@ -69,6 +78,7 @@ internal fun ChatTranscript(
     listState: LazyListState,
     onLoadOlder: () -> Unit,
     modifier: Modifier = Modifier,
+    followHint: Int = 0,
 ) {
     // Only the nodes that draw something: a zero-height item still costs its 4dp gap, and a turn's
     // worth of structural events stacks those gaps into a blank band under the chrome.
@@ -93,13 +103,39 @@ internal fun ChatTranscript(
     }
 
     var lastSession by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(itemCount, sessionId) {
+    var lastFollowHint by remember { mutableIntStateOf(0) }
+    LaunchedEffect(itemCount, sessionId, followHint) {
         if (itemCount == 0) return@LaunchedEffect
         val switched = sessionId != lastSession
+        val hinted = followHint != lastFollowHint
         lastSession = sessionId
-        // Opening a session should land on its tail, not animate the whole list to get there.
-        if (switched) listState.scrollToItem(itemCount - 1)
-        else if (wasNearBottom) listState.animateScrollToItem(itemCount - 1)
+        lastFollowHint = followHint
+        // A freshly opened session lands on its tail without animating the whole list there.
+        // A just-dismissed interaction dock (user answered a question / approved) also snaps back
+        // to the tail unconditionally so the agent's reply is revealed even if the reader had
+        // scrolled up to study the question. Otherwise we only follow when already at the bottom.
+        // The large scrollOffset anchors the newest content at the bottom edge so a long reply's
+        // tail — not just its start — is what's on screen.
+        if (switched) listState.scrollToItem(itemCount - 1, scrollOffset = BOTTOM_ANCHOR_OFFSET)
+        else if (hinted) listState.scrollToItem(itemCount - 1, scrollOffset = BOTTOM_ANCHOR_OFFSET)
+        else if (wasNearBottom) listState.animateScrollToItem(itemCount - 1, scrollOffset = BOTTOM_ANCHOR_OFFSET)
+    }
+
+    // While the agent is streaming and the reader is at the tail, keep the newest content in
+    // view. The effect above only fires when a whole new node is added; an existing node growing
+    // (a long reply streaming in) would otherwise shove the live edge below the fold. This cheap
+    // polling loop re-anchors the tail without fighting an intentional scroll-away.
+    val running = conversation?.running == true
+    LaunchedEffect(running, sessionId) {
+        if (!running || itemCount == 0) return@LaunchedEffect
+        while (true) {
+            val total = listState.layoutInfo.totalItemsCount
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            if (total > 0 && wasNearBottom && lastVisible < total - 2) {
+                listState.animateScrollToItem(total - 1, scrollOffset = BOTTOM_ANCHOR_OFFSET)
+            }
+            delay(400)
+        }
     }
 
     // Reaching the top pulls the next page. The guard matters: this effect sits above the `loading`

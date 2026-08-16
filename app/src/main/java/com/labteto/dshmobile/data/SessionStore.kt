@@ -1143,10 +1143,16 @@ class SessionStore @Inject constructor(
         if (receipt == null) log("approval response not acknowledged for $approvalId")
     }
 
+    /** One resolved ask_user_question answer sent back to the harness (custom is per-item). */
+    data class QuestionAnswerEntry(
+        val id: String,
+        val selected: List<String>,
+        val custom: String? = null,
+    )
+
     suspend fun answerQuestions(
         sessionId: String,
-        answers: List<Pair<String, List<String>>>,
-        custom: String? = null,
+        answers: List<QuestionAnswerEntry>,
     ) {
         val api = apiOrNull() ?: return
         val rpcId = synchronized(lock) { questionRpcBySession[sessionId] }
@@ -1154,19 +1160,20 @@ class SessionStore @Inject constructor(
             log("no pending question for session $sessionId")
             return
         }
-        val answersJson = JsonArray(answers.map { (id, selected) ->
+        // The harness expects { answers: [ { id, selected, custom? } ] }, i.e. `custom` is
+        // per-item (sibling of `selected`), not a global field on the answer — a misplaced custom
+        // is silently dropped and the "Other…" reply comes out empty.
+        val answersJson = JsonArray(answers.map { entry ->
             buildJsonObject {
-                put("id", JsonPrimitive(id))
-                put("selected", JsonArray(selected.map { JsonPrimitive(it) }))
+                put("id", JsonPrimitive(entry.id))
+                put("selected", JsonArray(entry.selected.map { JsonPrimitive(it) }))
+                entry.custom?.takeIf { it.isNotBlank() }
+                    ?.let { put("custom", JsonPrimitive(it)) }
             }
         })
-        val answerObj = buildJsonObject {
-            put("answers", answersJson)
-            custom?.let { put("custom", JsonPrimitive(it)) }
-        }
         val value = buildJsonObject {
             put("sessionId", JsonPrimitive(sessionId))
-            put("answer", answerObj)
+            put("answer", buildJsonObject { put("answers", answersJson) })
         }
         val receipt = api.respond(rpcId, value)
         if (receipt == null) log("question response not acknowledged for $sessionId")

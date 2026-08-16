@@ -9,7 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -103,7 +103,12 @@ fun DsButton(
         interactionSource = interaction,
     ) {
         Row(
-            modifier = Modifier.fillMaxSize().padding(horizontal = if (normal) 16.dp else 12.dp),
+            // Wrap horizontally so a DsButton takes only as much width as its label needs.
+            // (fillMaxSize here made the button consume ALL available width, which in a
+            // multi-button Row starved every sibling to zero width and left them
+            // invisible/un-tappable — e.g. the question panel's Submit/Cancel.) Callers that
+            // want a full-width button opt in via the button's `modifier` (fillMaxWidth/weight).
+            modifier = Modifier.fillMaxHeight().padding(horizontal = if (normal) 16.dp else 12.dp),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {

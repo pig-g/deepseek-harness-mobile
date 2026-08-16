@@ -201,3 +201,47 @@
 - `app/src/main/res/values/strings.xml` (chat_open_failed, chat_open_retry)
 
 **현재 상태**: 결정적 근본 원인(Compose 상태 라이프사이클 — 세션 전환 시 TextField/IME stale) 확정·수정·**사용자 실기기 검증 완료**. `key(currentSessionId)`로 Composer 강제 재생성이 핵심 픽스. 보조로 openSession 이벤트 유실 레이스(seq 머지), 다운링크 튜닝(pingInterval/handshake timeout), 큐-앤-오토-플러시, 진단 로그 추가. 앱 빌드/실행 정상, 콜드 스타트 크래시 없음. **렌더링·무한 초기화·새 세션 Send 무반응·이벤트 유실·침묵 전송 모두 해결됨.**
+
+---
+
+## 11. 이후 세션에서 추가 해결 (UX/Layout)
+
+### 11.1 질문 창(ask_user_question)이 입력/진행/탈출이 안 되던 문제 — **해결 완료 (라이브 하네스 end-to-end 검증됨)**
+- 증상: LLM이 `ask_user_question`을 던지면 선택창이 뜨고 탭 하이라이트는 되지만 Submit/Cancel(및 Skip/Next)을 눌러도 진행/탈출 불가. **옵션은 클릭되지만(일반 `clickable`) 진행/닫기 버튼이 죽어 있음.**
+- **확정된 근본 원인**: `DsButton.kt` 내부 content `Row(modifier = Modifier.fillMaxSize().padding(...))`의 **`fillMaxSize()`** 때문. `fillMaxSize()`가 버튼을 **부모가 준 공간 전부**로 확장시키므로, **여러 DsButton이 한 `Row`에 나란히 있을 때 첫 번째 버튼이 Row 전체 폭을 다 차지하고 나머지 버튼들은 남는 폭(0)으로 붕괴** → Submit/Cancel이 0폭으로 렌더링·터치 영역 모두 사라짐. 호스트 측 확인: live 세션에는 `question/requested`만 있고 **어떤 answer도 도달하지 않음**(에이전트가 ask에서 영원히 정지).
+- 증거(에뮬레이터 instrumentation geometry probe): QuestionsPanel에서 `Previous`(disabled)만 full width, `Submit`/`Cancel`(enabled)이 `[399,201][399,229]` **0폭**. `plainBox` 단일 버튼도 `0..411` full width, `rowNoWeight`=첫 버튼 full width+둘째 0폭, ApprovalPanel `Allow once` full width + `Reject` ABSENT → **행 안의 버튼 여럿일 때 체계적으로 발생**(Approval/PlanReview/시트/대화상자에도 동일 버그 잠재).
+- 수정 (`DsButton.kt`): content Row modifier를 `Modifier.fillMaxSize()` → **`Modifier.fillMaxHeight()`**로 변경(가로는 label 크기만큼 자동 wrap, 세로만 채워 세로중앙 정렬 유지). 전체폭이 필요한 호출부는 기존 `modifier` 파라미터(`fillMaxWidth`/`weight`)로 명시하면 됨. 단일 수정으로 Questions/Approval/PlanReview/대화상자/시트의 모든 버튼 Row가 정상화.
+- 본문 스크롤 고정(bound+scroll) 수정은 11.1의 보조 조치로 유지.
+- 검증(라이브 하네스, 에뮬레이터에서 실제 해결): 실기기와 동일한 live `session-832dbfc4`(stopReason=pending ask)를 열어 확인 — 수정 전 액션 행엔 `Previous`만 렌더(Submit/Cancel 0폭). 수정 후 uiautomator에 `Previous[64,1874][198,1914]` `Submit[718,1874][827,1914]` `Cancel[912,1874][1016,1914]` 정상 렌더. 옵션 → Submit 탭 → **패널 닫힘 + 에이전트 재개**(\"You chose Explore the workspace…\"), 호스트 세션 로그에 `seq274 tool/result {"answers":[{\"id\":\"next_step\",\"selected\":[\"Explore the workspace\"]}]}` 기록 확인 → **end-to-end 정상 동작 확정**.
+
+### 11.2 키보드가 뜨면 입력창이 너무 위로 올라가 아래에 큰 빈 공간 — 해결
+- 증상: 폰에서 키보드가 뜨면 Composer(입력창)가 화면 대부분을 띄고(에뮬에서 y~745px 지점까지 점프) 아래에 키보드 높이만큼 휑한 빈 공간.
+- 원인: `enableEdgeToEdge()`(decorFits=false)에서 `safeDrawingPadding()`이 IME inset을 읽는데, 창이 자동 resize(기본 softInputMode)와 함께 **이중 반영** → 입력창이 2배로 밀려 올라감.
+- 수정 (`AndroidManifest.xml` MainActivity): `android:windowSoftInputMode="adjustNothing"` 추가. **Compose inset 방식**이라 resize 없이 IME inset을 한 번만 소비.
+- 검증: 에뮬(수정 전) EditText top ~550px/blank ~730px → (수정 후) EditText bottom ~1322px로 키보드 top(1517px) 직상단, nav bar(~126px)만 남음. 빈 공간 해소.
+
+### 11.3 Composer 크기 살짝 축소
+- `Composer.kt`: Surface/Column의 세로 padding을 `DsSpacing.small→xsmall`로 줄여 폰 대비 입력 영역을 다소 컴팩트하게.
+
+### 11.4 질문에 답한 뒤 대화가 아래(Latest)로 안 내려가 최신 답을 못 보던 문제 — **해결 (에뮬 검증)**
+- 증상: 에이전트가 질문에 답(특히 긴 답)한 뒤 화면이 맨 아래(Latest)로 굴러가지 않아 답 버블의 끝 부분이 접혀 안 보임.
+- 원인(`ChatTranscript.kt`): 자동 팔로우가 `animateScrollToItem(itemCount-1)`(기본 `scrollOffset=0`)을 사용해 **마지막 메시지의 TOP을 뷰포트 상단**에 맞춤 → 한 메시지가 긴 경우 그 시작만 보이고 최신 끝부분은 화면 밖. 더구나 질문/승인 같은 차단 덕을 닫았을 때의 강제 스크롤이 없어서, 유저가 질문을 읽으러 위로 스크롤했으면 답이 와도 안 내려감.
+- 수정:
+  1) 모든 팔로우 스크롤을 **bottom-anchor**로 — `scrollToItem/animateScrollToItem(idx, scrollOffset = BOTTOM_ANCHOR_OFFSET(=Int.MAX_VALUE))` (프레임워크가 리스트 끝으로 클램프 → 최신 내용을 하단에 고정).
+  2) `ChatScreen.kt`: 현재 세션의 덕(question/approval)이 **닫힐 때** `followBottomKey++` → `ChatTranscript`의 `followHint`로 전달, hint가 바뀌면 `wasNearBottom`과 무관하게 **무조건 tail로 스크롤**(질문 읽느라 올라갔어도 답을 보여줌).
+  3) 스트리밍 중에는 폴링 루프(running 동안 `delay 400ms`)로 tail을 하단 재고정 → 긴 답이 자라도 최신 라인이 계속 보임.
+- 검증(에뮬): 긴 30줄 답변 생성 후 앱 재시작(session switch → tail) 시 **21~30번 줄이 화면에, 30번이 하단([43,1893][117,1942])**으로 표시(수정 전엔 1~11번이 상단/접힘). 크래시 0. 차단 덕 닫기 힌트는 동일한 bottom-anchor 경로를 사용하므로 질문 답 직후에도 동일하게 tail 고정.
+
+**신규 변경 파일2(절)**: `ChatScreen.kt`(followBottomKey 덕-닫힘 hint), `ChatTranscript.kt`(followHint param + bottom-anchor 스크롤 + 스트리밍 폴링).
+
+### 11.5 `ask_user_question`의 "Other" 자유 입력이 빈 문자열로 제출되던 문제 — **해결 (라이브 하네스 end-to-end 검증)**
+- 증상: 손으로 고른 탭(selected)은 정상 제출되는데, "Other…" 텍스트 입력값이 비어서 전달됨(에이전트가 자유 입력을 못 봄).
+- 원인:
+  1) **`custom`을 잘못된 위치에 전송** — `SessionStore.answerQuestions`가 `custom`을 answer 객체의 **최상위**에 두고 있었지만, 하네스 스키마는 `answers[]` **각 항목 안에 per-item** 으로 요구(`{id, selected, custom?}`)함. 잘못된 위치의 custom은 무시 → Other 텍스트 유실(빈 값).
+  2) **단일선택에서 탭+Other 병존** — 하네스 검증(`api-proxy.ts:723-731`)은 단일선택이 `selected`와 `custom`을 동시에 갖거나, `custom`이 빈 문자열이면 **거부**함.
+- 수정:
+  - `InteractionPanels.kt` `currentAnswer`: 단일선택에서 Other가 채워지면 그 값이 곧 답 → `selected`는 비우고 `custom`만 전송(멀티선택은 selected와 병존 허용). Other 공백이면 `custom` 생략.
+  - `SessionStore.answerQuestions` → **`List<QuestionAnswerEntry>`(id/selected/custom)** 받아 각 항목 안에 `custom`을 넣어 전송(비어있으면 생략). 상위 `custom` 제거. `ChatScreen.kt`의 submit/plan-review/cancel 호출부를 `QuestionAnswerEntry`로 갱신.
+- 검증(라이브 하네스, 에뮬): 새 단일선택 질문(Colors/Red/Blue)에서 탭 선택 없이 Other에 `green` 입력 → Submit → 하네스 세션 로그 `seq437 tool/result`에 **`{"answers":[{"id":"color_pick","selected":[],"custom":"green"}]}`** 기록, 앱 트랜스크립트에 **"Received: custom = green"** 렌더 → 정확히 per-item custom 전달 확인.
+
+**신규 변경 파일**: `AndroidManifest.xml`(adjustNothing), `Composer.kt`(패딩 축소), **`DsButton.kt`(fillMaxSize→fillMaxHeight — 버튼 Row 붕괴 근본 수정)**, `InteractionPanels.kt`(QuestionsPanel bound+scroll **+`currentAnswer` 단일선택 Other→custom 전용), `SessionStore.kt`(`answerQuestions` per-item `custom` / `QuestionAnswerEntry`), `ChatScreen.kt`(followBottomKey 덕-닫힘 hint + `QuestionAnswerEntry` 호출부), `ChatTranscript.kt`(followHint + bottom-anchor 스크롤 + 스트리밍 폴링), 새 `app/src/androidTest/.../ui/components/QuestionsPanelTest.kt`(smoke guard). 빌드/설치/실기기 연결 정상, 크래시 0. **11.1 end-to-end(라이브 하네스) + 11.4(에뮬) + 11.5(라이브 하네스) 검증 완료.**

@@ -19,8 +19,10 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -112,6 +114,22 @@ fun ChatScreen(
     // Hoisted above the tab swap so each view keeps its own scroll position across switches.
     val chatListState = rememberLazyListState()
     val trajectoryListState = rememberLazyListState()
+
+    // Bumped whenever a blocking interaction dock (question / approval) for the current session
+    // is dismissed, so the transcript snaps back to the tail and reveals the agent's reply even if
+    // the reader had scrolled up to study the prompt instead of being at the bottom.
+    var followBottomKey by remember { mutableIntStateOf(0) }
+    var hadDockBySession by remember(currentSessionId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(pendingQuestions, pendingApproval, currentSessionId) {
+        val dock = when {
+            pendingQuestions?.sessionId == currentSessionId -> pendingQuestions?.sessionId
+            pendingApproval?.sessionId == currentSessionId -> pendingApproval?.sessionId
+            else -> null
+        }
+        val prev = hadDockBySession
+        hadDockBySession = dock
+        if (dock == null && prev != null) followBottomKey++
+    }
 
     val commandFailed = stringResource(R.string.err_command_failed)
     val unknownCommand = stringResource(R.string.err_command_unknown)
@@ -276,6 +294,7 @@ fun ChatScreen(
                         context = nodeContext,
                         listState = chatListState,
                         onLoadOlder = { scope.launch { store.loadOlder() } },
+                        followHint = followBottomKey,
                     )
                     ChatTab.Trajectory -> TrajectoryTab(
                         conversation = conversation,
@@ -332,7 +351,7 @@ fun ChatScreen(
                         scope.launch {
                             store.answerQuestions(
                                 questions.sessionId,
-                                listOf(planReview.id to listOfNotNull(label)),
+                                listOf(SessionStore.QuestionAnswerEntry(planReview.id, listOfNotNull(label), null)),
                             )
                         }
                     }
@@ -363,8 +382,9 @@ fun ChatScreen(
                             scope.launch {
                                 store.answerQuestions(
                                     questions.sessionId,
-                                    questions.items.map { it.id to emptyList<String>() },
-                                    null,
+                                    questions.items.map {
+                                        SessionStore.QuestionAnswerEntry(it.id, emptyList(), null)
+                                    },
                                 )
                             }
                         },
@@ -446,8 +466,7 @@ private fun submitAnswers(
     scope.launch {
         store.answerQuestions(
             sessionId,
-            answers.map { it.id to it.selected },
-            answers.firstOrNull { it.custom != null }?.custom,
+            answers.map { SessionStore.QuestionAnswerEntry(it.id, it.selected, it.custom) },
         )
     }
 }
