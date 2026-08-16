@@ -27,6 +27,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.labteto.dshmobile.R
 import com.labteto.dshmobile.core.session.ConversationSnapshot
@@ -62,6 +63,8 @@ internal fun ChatTranscript(
     loading: Boolean,
     loadingOlder: Boolean,
     loadOlderFailed: Boolean,
+    openFailed: Boolean = false,
+    onRetryOpen: () -> Unit = {},
     context: ChatNodeContext,
     listState: LazyListState,
     onLoadOlder: () -> Unit,
@@ -111,7 +114,11 @@ internal fun ChatTranscript(
     }
 
     if (loading) {
-        TranscriptSkeleton(modifier)
+        if (openFailed) {
+            TranscriptRefresh(onRetry = onRetryOpen, modifier = modifier)
+        } else {
+            TranscriptSkeleton(modifier)
+        }
         return
     }
 
@@ -188,6 +195,32 @@ private fun LoadOlderRow(loading: Boolean, failed: Boolean, onRetry: () -> Unit)
         }
 
         else -> Spacer(Modifier.height(1.dp))
+    }
+}
+
+/** The current session's history failed to load: offer a retry instead of an endless "initializing" skeleton. */
+@Composable
+private fun TranscriptRefresh(onRetry: () -> Unit, modifier: Modifier = Modifier) {
+    val colors = DsTheme.colors
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Text(
+            stringResource(R.string.chat_open_failed),
+            style = DsType.std14,
+            color = colors.labelSecondary,
+            textAlign = TextAlign.Center,
+        )
+        DsButton(
+            text = stringResource(R.string.chat_open_retry),
+            onClick = onRetry,
+            variant = DsButtonVariant.Primary,
+            size = DsButtonSize.Small,
+        )
     }
 }
 

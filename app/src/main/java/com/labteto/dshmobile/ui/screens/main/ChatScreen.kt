@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,6 +84,7 @@ fun ChatScreen(
     val subagentMode by store.subagentMode.collectAsStateWithLifecycle()
     val connectionError by store.connectionError.collectAsStateWithLifecycle()
     val loadingOlder by store.loadingOlder.collectAsStateWithLifecycle()
+    val openFailed by store.openFailed.collectAsStateWithLifecycle()
     val loadOlderFailed by store.loadOlderFailed.collectAsStateWithLifecycle()
     val pendingApproval by store.pendingApproval.collectAsStateWithLifecycle()
     val pendingQuestions by store.pendingQuestions.collectAsStateWithLifecycle()
@@ -154,7 +156,27 @@ fun ChatScreen(
     fun send() {
         val text = draft
         val pending = attachments.toList()
-        if (text.isBlank() && pending.isEmpty()) return
+        if (text.isBlank() && pending.isEmpty()) {
+            android.util.Log.d("DSHSend", "send blocked: blank text (draft len=${text.length}) and no attachments")
+            return
+        }
+        // With no open session the prompt path silently drops the text; keep the draft and say so
+        // instead of letting Send look like a no-op.
+        if (currentSessionId == null) {
+            android.util.Log.d("DSHSend", "send blocked: no session (currentSessionId null)")
+            toast.second("Open or create a conversation first to send messages.")
+            return
+        }
+        // The downlink (events.mux) is what makes a send show up: without it the prompt still goes
+        // out over HTTP but the user bubble / running / answer never stream back, so Send looks
+        // dead for a long stretch. Keep the draft, say so, and ask the downlink to reconnect now
+        // instead of letting the user wait out the reconnect backoff in silence.
+        if (!store.isConnectionReady()) {
+            android.util.Log.d("DSHSend", "send blocked: connection not ready phase=${store.connectionPhase()}")
+            toast.second("Reconnecting to the harness — your message is kept; try again in a moment.")
+            store.kickConnection()
+            return
+        }
         // A slash line that names a registered command is not a message: `session.prompt` would
         // hand it to the model verbatim, so it has to be recognised here and written through the
         // command gateway. A miss falls through to the prompt path — that is how skills work.
@@ -249,6 +271,8 @@ fun ChatScreen(
                         loading = conversation == null && currentSessionId != null,
                         loadingOlder = loadingOlder,
                         loadOlderFailed = loadOlderFailed,
+                        openFailed = openFailed,
+                        onRetryOpen = { scope.launch { store.retryOpenCurrentSession() } },
                         context = nodeContext,
                         listState = chatListState,
                         onLoadOlder = { scope.launch { store.loadOlder() } },
@@ -348,22 +372,29 @@ fun ChatScreen(
                 }
             }
 
-            Composer(
-                draft = draft,
-                onDraftChange = { draft = it },
-                attachments = attachments,
-                onRemoveAttachment = { index -> attachments.removeAt(index) },
-                permissions = permissions,
-                pendingPermission = pendingPermission,
-                onPermissionPick = { value -> scope.launch { report(store.setPermissionPreset(value)) } },
-                contextBreakdown = contextBreakdown,
-                contextPressure = contextPressure,
-                running = conversation?.running == true,
-                enabled = currentSessionId != null,
-                onOpenSheet = { sheet = ChatSheet.Commands },
-                onSend = ::send,
-                onStop = { scope.launch { store.cancelTurn() } },
-            )
+            // Force the Composer (TextField + send button) to be fully recreated when the session
+            // changes, not just recomposed. A recompose leaves the TextField's internal state
+            // (IME connection, cursor, composition) stale — the send button appears but taps don't
+            // register until a rotation recreates the Activity. key() does what rotation does,
+            // but automatically on every session switch.
+            key(currentSessionId) {
+                Composer(
+                    draft = draft,
+                    onDraftChange = { draft = it },
+                    attachments = attachments,
+                    onRemoveAttachment = { index -> attachments.removeAt(index) },
+                    permissions = permissions,
+                    pendingPermission = pendingPermission,
+                    onPermissionPick = { value -> scope.launch { report(store.setPermissionPreset(value)) } },
+                    contextBreakdown = contextBreakdown,
+                    contextPressure = contextPressure,
+                    running = conversation?.running == true,
+                    enabled = currentSessionId != null,
+                    onOpenSheet = { sheet = ChatSheet.Commands },
+                    onSend = ::send,
+                    onStop = { scope.launch { store.cancelTurn() } },
+                )
+            }
 
             StatsFooter(stats = sessionStats, usage = tokenUsage)
         }

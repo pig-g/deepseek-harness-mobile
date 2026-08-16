@@ -88,8 +88,17 @@ class LoopConfig(
     val maxDelayMs: Long = 10_000L,
     /** Jitter span bound: the actual sleep is uniform in [cap/2, cap] of the attempt cap. */
     val jitterCapMs: Long = 10_000L,
-    /** How long a generation may take to open both streams before it is abandoned. */
-    val streamOpenTimeoutMs: Long = 3_000L,
+    /**
+     * How long a generation may take to open both streams before it is abandoned.
+     *
+     * This has to be generous on a phone↔remote-harness link: the ready handshake opens two
+     * WebSockets (one round trip each) before `host.describe`. On a slow or lossy cellular path a
+     * 3s budget is hit repeatedly, and each abandonment feeds the reconnect backoff — so a link
+     * that is merely slow spends a long stretch in CONNECTING/RECONNECTING even though it is alive.
+     * A dead link is detected independently by the OkHttp ping keepalive, so the larger budget only
+     * postpones giving up on a link that is already gone.
+     */
+    val streamOpenTimeoutMs: Long = 8_000L,
     /** Injectable sleep used between generations. */
     val delay: suspend (Long) -> Unit = ::defaultSleep,
 )

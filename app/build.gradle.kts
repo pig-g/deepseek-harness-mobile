@@ -32,6 +32,7 @@ val dshVersionCode: Int = dshVersionName
 android {
     namespace = "com.labteto.dshmobile"
     compileSdk = 35
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
         applicationId = "com.labteto.dshmobile"

@@ -32,7 +32,12 @@ object AppModule {
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
-        .pingInterval(20, TimeUnit.SECONDS)
+        // The events.mux downlink is read-only and carries no traffic while idle, so this ping is
+        // the app's only way to notice a silently dropped socket. A dead link otherwise leaves the
+        // app CONNECTED-but-dead: Send still reaches the harness over HTTP but nothing streams back
+        // until the socket finally fails — the "nothing reacts, then suddenly all normal" symptom.
+        // A tight interval bounds that dead stretch (20s here felt unresponsive on a remote link).
+        .pingInterval(10, TimeUnit.SECONDS)
         .build()
 
     @Provides

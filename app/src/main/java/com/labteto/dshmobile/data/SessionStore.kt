@@ -242,6 +242,11 @@ class SessionStore @Inject constructor(
     private val _loadOlderFailed = MutableStateFlow(false)
     val loadOlderFailed: StateFlow<Boolean> = _loadOlderFailed.asStateFlow()
 
+    /** Set when the current session's initial history fetch failed (so the chat can offer retry
+     *  instead of an indefinitely spinning "initializing" skeleton). */
+    private val _openFailed = MutableStateFlow(false)
+    val openFailed: StateFlow<Boolean> = _openFailed.asStateFlow()
+
     private val _subagents = MutableStateFlow<List<SubagentListEntry>>(emptyList())
     val subagents: StateFlow<List<SubagentListEntry>> = _subagents.asStateFlow()
 
@@ -388,8 +393,10 @@ class SessionStore @Inject constructor(
         refreshSessions()
         // On a reconnect `currentSessionId` is already set, so the resolver only ever runs on the
         // first connect of a process — no double-open, and reconnect keeps reopening what was open.
-        val sid = currentSessionId.value ?: resolveInitialSession() ?: return
-        openSession(sid)
+        val sid = currentSessionId.value ?: resolveInitialSession()
+        if (sid != null) {
+            openSession(sid)
+        }
     }
 
     /**
@@ -426,9 +433,12 @@ class SessionStore @Inject constructor(
             is MuxFrame.SessionEventFrame -> handleSessionEvent(mux.sessionId, mux.event, mux.view)
             is MuxFrame.SessionSubscribed -> {
                 val sid = mux.sessionId
-                scope.launch {
-                    if (sid == currentSessionId.value) openSession(sid)
-                }
+                Log.d("DSHConn", "session/subscribed: $sid (current=${currentSessionId.value})")
+                // Do NOT re-open here. createSession()/openSession() handle the initial open and
+                // triggerBaseline() handles the reconnect re-open. Calling openSession() from this
+                // handler double-opens the session: its currentEvents.clear() wipes events that
+                // arrived between the first open and this frame, and the history re-fetch may not
+                // include them yet — that is the "send does nothing, then suddenly works" bug.
             }
             is MuxFrame.ApprovalRequested -> handleApprovalRequested(frame.rpcId, mux)
             is MuxFrame.ApprovalResolved -> handleApprovalResolved(mux)
@@ -830,6 +840,7 @@ class SessionStore @Inject constructor(
 
     suspend fun openSession(sessionId: String) {
         val api = apiOrNull() ?: return
+        _openFailed.value = false
         _loadOlderFailed.value = false
         synchronized(lock) {
             val same = currentId == sessionId
@@ -867,9 +878,17 @@ class SessionStore @Inject constructor(
                 }
                 synchronized(lock) {
                     if (currentId != sessionId) return@synchronized
-                    currentEvents.clear()
-                    currentEvents.addAll(envelopes)
-                    currentEvents.sortBy { it.seq }
+                    // Merge, not replace: events that arrived on the mux WS during the history
+                    // fetch are already in currentEvents (appended by handleSessionEvent). Clearing
+                    // here wipes the user's send and the model's answer — the "send does nothing,
+                    // then suddenly works" bug. Keep live events; add history events not already
+                    // present (same merge pattern loadOlder uses).
+                    val existingSeqs = currentEvents.mapTo(HashSet()) { it.seq }
+                    val fresh = envelopes.filter { it.seq !in existingSeqs }
+                    if (fresh.isNotEmpty()) {
+                        currentEvents.addAll(fresh)
+                        currentEvents.sortBy { it.seq }
+                    }
                     currentHasMore = r.value.hasMore || overDelivered
                     toolViewsBySeq.putAll(views)
                     _toolViews.value = toolViewsBySeq.toMap()
@@ -879,15 +898,53 @@ class SessionStore @Inject constructor(
                         }
                     }
                     rebuildCurrentLocked()
+                    _openFailed.value = false
                 }
             }
-            is RpcResult.Err -> setConnectionError(r.error.message)
+            is RpcResult.Err -> {
+                setConnectionError(r.error.message)
+                _openFailed.value = true
+            }
         }
-        loadSkills(sessionId)
-        loadModels(sessionId)
-        refreshSubagents()
-        refreshCommands()
+        // The transcript is already READY (conversation set above). These catalog refreshes are
+        // independent of open-chat usability, so run them in the background rather than serializing
+        // four more RPCs that would keep `openSession` (and anything awaiting it) suspended on a
+        // slow or busy harness — a hang in one of them must not leave the session "initializing".
+        scope.launch {
+            loadSkills(sessionId)
+            loadModels(sessionId)
+            refreshSubagents()
+            refreshCommands()
+        }
         rememberLastSession(sessionId)
+    }
+
+    /** Re-run a failed open for the current session (used by the transcript's Retry action). */
+    suspend fun retryOpenCurrentSession() {
+        val sid = currentSessionId.value ?: return
+        _currentConversation.value = null
+        _openFailed.value = false
+        openSession(sid)
+    }
+
+    /**
+     * True while the downlink is stable. When it is, a prompt is reflected (user bubble, running
+     * indicator, answer) almost immediately; when false the prompt still reaches the harness over
+     * HTTP but the app gets no events until the downlink reconnects, which silently makes Send look
+     * dead. Send surfaces this so it never waits on backoff in silence.
+     */
+    fun isConnectionReady(): Boolean =
+        connectionManager.state.value.phase == ConnectionPhase.CONNECTED
+
+    /** Current connection phase for diagnostics. */
+    fun connectionPhase(): ConnectionPhase = connectionManager.state.value.phase
+
+    /** Ask the downlink to reconnect immediately instead of waiting out the reconnect backoff. */
+    fun kickConnection() {
+        if (!isConnectionReady()) {
+            Log.d("DSHSend", "send kept; downlink not ready phase=${connectionManager.state.value.phase}; kicking reconnect")
+            connectionManager.reconnectIfNeeded()
+        }
     }
 
     /** Persist the landing session for this harness; a write failure is not worth surfacing. */
@@ -966,8 +1023,11 @@ class SessionStore @Inject constructor(
         val api = apiOrNull() ?: return
         when (val r = api.sessionCreate(SessionCreateRequest(workspaceId = workspaceId, cwd = cwd))) {
             is RpcResult.Ok -> {
-                refreshSessions()
+                // Open the new session first — openSession assigns `currentSessionId`, which is what
+                // enables Send. Refreshing the full session list round-trips it to the remote harness
+                // and must not sit in front of that on a slow link.
                 openSession(r.value.sessionId)
+                scope.launch { refreshSessions() }
             }
             is RpcResult.Err -> setConnectionError(r.error.message)
         }
@@ -1018,7 +1078,15 @@ class SessionStore @Inject constructor(
     }
 
     private suspend fun promptContent(mode: String, content: List<PromptContentPart>) {
-        val sid = currentSessionId.value ?: return
+        val sid = currentSessionId.value
+        if (sid == null) {
+            // The composer already cleared the draft, so a silent return makes Send look dead with
+            // no explanation. Surface why instead of swallowing it: opening or creating a
+            // conversation sets currentSessionId; until then there is nowhere to deliver the text.
+            log("send ignored: no session is open (currentSessionId null)")
+            setConnectionError("Nothing to send into — open a conversation from the list first.")
+            return
+        }
         val api = apiOrNull() ?: return
         val safeMode = if (mode == "steer") "steer" else "queue"
         val zone = TimeZone.getDefault().id
@@ -1028,6 +1096,7 @@ class SessionStore @Inject constructor(
             content = content,
             clientTimeZone = zone,
         )
+        Log.d("DSHSend", "prompt dispatch sid=$sid phase=${connectionManager.state.value.phase} ready=${isConnectionReady()}")
         when (val r = api.sessionPrompt(request)) {
             is RpcResult.Ok -> Unit
             is RpcResult.Err -> setConnectionError(r.error.message)

@@ -86,6 +86,7 @@ class ConnectionManager @Inject constructor(
         }
 
         override fun onConnected(description: HostDescription) {
+            android.util.Log.d("DSHConn", "connected: ${description.version}")
             val host = activeHost
             if (host != null) scope.launch { hostsStore.touchHost(host.host, host.port) }
             _state.value = ConnectionUiState(
@@ -110,6 +111,7 @@ class ConnectionManager @Inject constructor(
                 current.hasConnected -> ConnectionPhase.RECONNECTING
                 else -> ConnectionPhase.CONNECTING
             }
+            android.util.Log.d("DSHConn", "phase ${current.phase} -> $phase (loop=$state)")
             // Note: does not clear `failure`. The loop emits this on every retry, so clearing here
             // would erase the explanation a fraction of a second after showing it.
             _state.value = current.copy(phase = phase)
@@ -124,6 +126,7 @@ class ConnectionManager @Inject constructor(
         }
 
         override fun onGenerationFailed(attempt: Int, failure: GenerationFailure) {
+            android.util.Log.d("DSHConn", "generation failed attempt=$attempt: $failure")
             _state.value = _state.value.copy(
                 failure = ConnectFailure.from(failure),
                 attempts = attempt,

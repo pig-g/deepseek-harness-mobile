@@ -20,7 +20,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -81,6 +83,22 @@ data class UnknownContentBlock(
     val raw: JsonElement,
 ) : ContentBlock()
 
+/** Merge an explicit `type` discriminator back into a re-encoded block/chunk object.
+ *
+ * The wire protocol dispatches these polymorphic values on a top-level `type` field, but each
+ * concrete [ContentBlock]/[StreamChunk] data class carries no `type` property, so a decode-then-
+ * re-encode round trip (as the client does when turning a wire event into a foldable envelope)
+ * silently drops it. The fold then cannot tell a `text` block from a `tool-result` and renders
+ * messages empty. Re-adding `type` here preserves the discriminator through the round trip.
+ */
+private fun withType(json: JsonElement, type: String): JsonElement {
+    if (json !is JsonObject) return json
+    return buildJsonObject {
+        put("type", JsonPrimitive(type))
+        json.forEach { (k, v) -> put(k, v) }
+    }
+}
+
 /** Custom `type`-dispatching serializer for [ContentBlock]; unknown blocks pass through raw. */
 object ContentBlockSerializer : KSerializer<ContentBlock> {
     override val descriptor: SerialDescriptor = buildClassSerialDescriptor("ContentBlock") {
@@ -89,11 +107,11 @@ object ContentBlockSerializer : KSerializer<ContentBlock> {
 
     override fun serialize(encoder: Encoder, value: ContentBlock) {
         val json: JsonElement = when (value) {
-            is ContentBlock.Text -> encodeToJsonElement(ContentBlock.Text.serializer(), value)
-            is ContentBlock.Reasoning -> encodeToJsonElement(ContentBlock.Reasoning.serializer(), value)
-            is ContentBlock.Image -> encodeToJsonElement(ContentBlock.Image.serializer(), value)
-            is ContentBlock.ToolCall -> encodeToJsonElement(ContentBlock.ToolCall.serializer(), value)
-            is ContentBlock.ToolResult -> encodeToJsonElement(ContentBlock.ToolResult.serializer(), value)
+            is ContentBlock.Text -> withType(encodeToJsonElement(ContentBlock.Text.serializer(), value), "text")
+            is ContentBlock.Reasoning -> withType(encodeToJsonElement(ContentBlock.Reasoning.serializer(), value), "reasoning")
+            is ContentBlock.Image -> withType(encodeToJsonElement(ContentBlock.Image.serializer(), value), "image")
+            is ContentBlock.ToolCall -> withType(encodeToJsonElement(ContentBlock.ToolCall.serializer(), value), "tool-call")
+            is ContentBlock.ToolResult -> withType(encodeToJsonElement(ContentBlock.ToolResult.serializer(), value), "tool-result")
             is UnknownContentBlock -> value.raw
         }
         (encoder as JsonEncoder).encodeJsonElement(json)
@@ -181,13 +199,13 @@ object StreamChunkSerializer : KSerializer<StreamChunk> {
 
     override fun serialize(encoder: Encoder, value: StreamChunk) {
         val json: JsonElement = when (value) {
-            is StreamChunk.BlockStart -> encodeToJsonElement(StreamChunk.BlockStart.serializer(), value)
-            is StreamChunk.TextDelta -> encodeToJsonElement(StreamChunk.TextDelta.serializer(), value)
-            is StreamChunk.ReasoningDelta -> encodeToJsonElement(StreamChunk.ReasoningDelta.serializer(), value)
-            is StreamChunk.ToolCallDelta -> encodeToJsonElement(StreamChunk.ToolCallDelta.serializer(), value)
-            is StreamChunk.BlockEnd -> encodeToJsonElement(StreamChunk.BlockEnd.serializer(), value)
-            is StreamChunk.Usage -> encodeToJsonElement(StreamChunk.Usage.serializer(), value)
-            is StreamChunk.Finish -> encodeToJsonElement(StreamChunk.Finish.serializer(), value)
+            is StreamChunk.BlockStart -> withType(encodeToJsonElement(StreamChunk.BlockStart.serializer(), value), "block-start")
+            is StreamChunk.TextDelta -> withType(encodeToJsonElement(StreamChunk.TextDelta.serializer(), value), "text-delta")
+            is StreamChunk.ReasoningDelta -> withType(encodeToJsonElement(StreamChunk.ReasoningDelta.serializer(), value), "reasoning-delta")
+            is StreamChunk.ToolCallDelta -> withType(encodeToJsonElement(StreamChunk.ToolCallDelta.serializer(), value), "tool-call-delta")
+            is StreamChunk.BlockEnd -> withType(encodeToJsonElement(StreamChunk.BlockEnd.serializer(), value), "block-end")
+            is StreamChunk.Usage -> withType(encodeToJsonElement(StreamChunk.Usage.serializer(), value), "usage")
+            is StreamChunk.Finish -> withType(encodeToJsonElement(StreamChunk.Finish.serializer(), value), "finish")
             is UnknownStreamChunk -> value.raw
         }
         (encoder as JsonEncoder).encodeJsonElement(json)

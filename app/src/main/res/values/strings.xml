@@ -145,6 +145,8 @@
     <string name="chat_load_older">Load older messages</string>
     <string name="chat_loading_older">Loading earlier messages…</string>
     <string name="chat_load_older_retry">Couldn\'t load earlier messages — tap to retry</string>
+    <string name="chat_open_failed">Couldn\'t open this conversation. Check that the harness is reachable, then retry.</string>
+    <string name="chat_open_retry">Retry</string>
     <string name="chat_thinking">Thinking</string>
     <string name="chat_stopped">Stopped</string>
     <string name="chat_stopped_aborted">Turn aborted</string>
