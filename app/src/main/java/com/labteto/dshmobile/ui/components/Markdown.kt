@@ -3,6 +3,7 @@ package com.labteto.dshmobile.ui.components
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,22 +18,31 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -45,34 +55,40 @@ import com.labteto.dshmobile.ui.theme.DshTheme
 /**
  * Block-level Markdown renderer: fenced code blocks, #-#### headings, bullet and
  * ordered lists, blockquotes, and paragraphs with inline **bold**, *italic*,
- * `code` chips and [links](https://example.com). Tables render as plain text.
+ * `code` chips and [links](https://example.com). Bare `https://…` URLs are linked too.
+ * Tables render as plain text. The whole document is selectable (long-press), and
+ * tapping a link opens it in the system browser.
  */
 @Composable
 fun MarkdownText(text: String, modifier: Modifier = Modifier) {
     val colors = DsTheme.colors
     val blocks = remember(text) { parseMarkdown(text) }
-    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        blocks.forEach { block ->
-            when (block) {
-                is MdBlock.Heading -> {
-                    val style = when (block.level) {
-                        1 -> DsType.mdH1
-                        2 -> DsType.mdH2
-                        3 -> DsType.mdH3
-                        else -> DsType.mdH4
+    // One selection scope per document: long-press anywhere selects within it, with handles
+    // and the copy menu; a plain tap is left for the outer UI (message actions, toggles).
+    SelectionContainer {
+        Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            blocks.forEach { block ->
+                when (block) {
+                    is MdBlock.Heading -> {
+                        val style = when (block.level) {
+                            1 -> DsType.mdH1
+                            2 -> DsType.mdH2
+                            3 -> DsType.mdH3
+                            else -> DsType.mdH4
+                        }
+                        InlineMarkdown(block.text, style.copy(color = colors.labelPrimary), Modifier.padding(top = 10.dp))
                     }
-                    InlineMarkdown(block.text, style.copy(color = colors.labelPrimary), Modifier.padding(top = 10.dp))
-                }
-                is MdBlock.Paragraph -> InlineMarkdown(
-                    block.lines.joinToString(" "),
-                    DsType.mdBody.copy(color = colors.labelPrimary),
-                    Modifier.fillMaxWidth(),
-                )
-                is MdBlock.MdList -> MdListBlock(block)
-                is MdBlock.Blockquote -> MdBlockquote(block)
-                is MdBlock.Code -> CodeBlock(block.lang, block.code)
-                is MdBlock.Table -> block.rows.forEach { row ->
-                    InlineMarkdown(row, DsType.mdSmall.copy(color = colors.labelTertiary), Modifier.fillMaxWidth())
+                    is MdBlock.Paragraph -> InlineMarkdown(
+                        block.lines.joinToString(" "),
+                        DsType.mdBody.copy(color = colors.labelPrimary),
+                        Modifier.fillMaxWidth(),
+                    )
+                    is MdBlock.MdList -> MdListBlock(block)
+                    is MdBlock.Blockquote -> MdBlockquote(block)
+                    is MdBlock.Code -> CodeBlock(block.lang, block.code)
+                    is MdBlock.Table -> block.rows.forEach { row ->
+                        InlineMarkdown(row, DsType.mdSmall.copy(color = colors.labelTertiary), Modifier.fillMaxWidth())
+                    }
                 }
             }
         }
@@ -185,7 +201,7 @@ private fun isTableSeparator(line: String): Boolean =
 
 // ---- Inline rendering ------------------------------------------------------
 
-private sealed interface InlineSegment {
+internal sealed interface InlineSegment {
     data class Plain(val text: String) : InlineSegment
     data class Bold(val text: String) : InlineSegment
     data class Italic(val text: String) : InlineSegment
@@ -193,7 +209,7 @@ private sealed interface InlineSegment {
     data class Link(val text: String, val url: String) : InlineSegment
 }
 
-private fun parseInlineSegments(text: String): List<InlineSegment> {
+internal fun parseInlineSegments(text: String): List<InlineSegment> {
     val segments = mutableListOf<InlineSegment>()
     val sb = StringBuilder()
     var i = 0
@@ -205,6 +221,17 @@ private fun parseInlineSegments(text: String): List<InlineSegment> {
     }
     while (i < text.length) {
         when {
+            isBareUrlStart(text, i) -> {
+                val end = bareUrlEnd(text, i)
+                if (end > i) {
+                    flush()
+                    val url = text.substring(i, end)
+                    segments += InlineSegment.Link(url, url)
+                    i = end
+                } else {
+                    sb.append(text[i]); i++
+                }
+            }
             text.startsWith("`", i) -> {
                 val end = text.indexOf('`', i + 1)
                 if (end != -1) {
@@ -259,6 +286,47 @@ private fun parseInlineSegments(text: String): List<InlineSegment> {
     return segments
 }
 
+/** True if a bare `http(s)://` URL starts at [i] (word boundary, not mid-token, host present). */
+private fun isBareUrlStart(text: String, i: Int): Boolean {
+    val schemeLen = when {
+        text.startsWith("https://", i) -> 8
+        text.startsWith("http://", i) -> 7
+        else -> return false
+    }
+    // Guard against a token glued in front of the scheme (`foohttps://…` is not a URL).
+    if (i > 0 && (text[i - 1].isLetterOrDigit() || text[i - 1] == '_')) return false
+    // A scheme with nothing after it (`http:// end` or `http://` at end of line) is not a URL.
+    val after = i + schemeLen
+    if (after >= text.length) return false
+    val c = text[after]
+    return !c.isWhitespace() && c != '"' && c != '\'' && c != '`' && c != '<' && c != '>'
+}
+
+/** End (exclusive) of the bare URL starting at [start]: up to whitespace/quotes/brackets,
+ *  minus trailing sentence punctuation and unbalanced closing brackets. */
+private fun bareUrlEnd(text: String, start: Int): Int {
+    var end = start
+    while (end < text.length) {
+        val c = text[end]
+        if (c.isWhitespace() || c == '"' || c == '\'' || c == '<' || c == '>' || c == '`') break
+        end++
+    }
+    while (end > start) {
+        val c = text[end - 1]
+        when {
+            c == ')' || c == ']' -> {
+                val open = text.substring(start, end).count { it == '(' || it == '[' }
+                val close = text.substring(start, end).count { it == ')' || it == ']' }
+                if (close <= open) break
+                end--
+            }
+            ",.;:!?\"'".contains(c) -> end--
+            else -> break
+        }
+    }
+    return end
+}
+
 /** Renders one line of markdown with bold/italic/code/link spans. */
 @Composable
 private fun InlineMarkdown(text: String, style: TextStyle, modifier: Modifier = Modifier) {
@@ -270,19 +338,23 @@ private fun InlineMarkdown(text: String, style: TextStyle, modifier: Modifier = 
     val result = remember(text, style, codeStyle, colors) {
         buildInlineContent(text, codeStyle, colors)
     }
-    BasicText(
-        result,
-        modifier = modifier,
-        style = style,
-    )
+    SelectableText(result.text, result.links, style, modifier)
 }
+
+/** A clickable link span: the URL plus the character range it occupies in the text. */
+internal data class TextLink(val url: String, val range: TextRange)
+
+/** Built text plus its link spans. */
+internal data class InlineResult(val text: AnnotatedString, val links: List<TextLink>)
 
 private fun buildInlineContent(
     text: String,
     codeStyle: TextStyle,
     colors: DsColors,
-): AnnotatedString {
+): InlineResult {
     val builder = AnnotatedString.Builder()
+    val links = mutableListOf<TextLink>()
+    val linkStyle = SpanStyle(color = colors.accent, textDecoration = TextDecoration.LineThrough)
     parseInlineSegments(text).forEach { segment ->
         when (segment) {
             is InlineSegment.Plain -> builder.append(segment.text)
@@ -292,12 +364,100 @@ private fun buildInlineContent(
                 SpanStyle(fontFamily = codeStyle.fontFamily, color = codeStyle.color),
             ) { append(segment.text) }
             is InlineSegment.Link -> {
-                // v1 renders links as accent-colored text (no click-through).
-                builder.withStyle(SpanStyle(color = colors.accent)) { append(segment.text) }
+                val start = builder.length
+                builder.withStyle(linkStyle) { append(segment.text) }
+                links += TextLink(segment.url, TextRange(start, builder.length))
             }
         }
     }
-    return builder.toAnnotatedString()
+    return InlineResult(builder.toAnnotatedString(), links)
+}
+
+/**
+ * Plain text with bare `http(s)` URLs turned into link spans (no markdown interpretation).
+ * Used for user message bubbles, which render raw text.
+ */
+internal fun linkifyUrls(text: String, linkStyle: SpanStyle): InlineResult {
+    val builder = AnnotatedString.Builder()
+    val links = mutableListOf<TextLink>()
+    var plainStart = 0
+    var i = 0
+    while (i < text.length) {
+        if (!isBareUrlStart(text, i)) {
+            i++
+            continue
+        }
+        val end = bareUrlEnd(text, i)
+        if (end <= i) {
+            i++
+            continue
+        }
+        // Flush the plain run before this URL; the builder stays 1:1 with the input text.
+        if (i > plainStart) builder.append(text.substring(plainStart, i))
+        val start = builder.length
+        builder.withStyle(linkStyle) { append(text.substring(i, end)) }
+        links += TextLink(text.substring(i, end), TextRange(start, builder.length))
+        i = end
+        plainStart = end
+    }
+    if (plainStart < text.length) builder.append(text.substring(plainStart))
+    return InlineResult(builder.toAnnotatedString(), links)
+}
+
+/**
+ * Selectable text with tappable links: long-press selects (handles + copy menu, provided by the
+ * enclosing [SelectionContainer]) and a quick tap on a link span opens the URL in the system
+ * browser. A tap that lands on a link claims the gesture (consumes the down event) so an
+ * outer `clickable` modifier — e.g. the message-actions toggle — does not fire as well.
+ */
+@Composable
+internal fun SelectableText(
+    text: AnnotatedString,
+    links: List<TextLink>,
+    style: TextStyle,
+    modifier: Modifier = Modifier,
+) {
+    val uriHandler = LocalUriHandler.current
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    // `pointerInput` is appended last so its coordinate space is the text frame itself
+    // (after any padding/background modifiers the caller passed).
+    BasicText(
+        text,
+        modifier = modifier.pointerInput(text, links) {
+            awaitPointerEventScope {
+                // The scope is a `Density`, so dp converts directly.
+                val slop = 8.dp.toPx()
+                while (true) {
+                    val down = awaitFirstDown(requireUnconsumed = true)
+                    val result = layout ?: continue
+                    val offset = result.getOffsetForPosition(down.position)
+                    val hit = links.firstOrNull { it.range.start <= offset && offset < it.range.end }
+                        ?: continue
+                    // Claim the gesture so the outer message-level `clickable` (action toggle)
+                    // does not fire on a link tap.
+                    down.consume()
+                    var last = down.position
+                    var released = false
+                    while (!released) {
+                        val event = awaitPointerEvent()
+                        event.changes.forEach { change ->
+                            if (change.pressed) {
+                                last = change.position
+                            } else {
+                                released = true
+                                last = change.position
+                                val dx = last.x - down.position.x
+                                val dy = last.y - down.position.y
+                                if (dx * dx + dy * dy <= slop * slop) uriHandler.openUri(hit.url)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        style = style,
+        onTextLayout = { layout = it },
+    )
 }
 
 // ---- Block renderers --------------------------------------------------------
@@ -394,7 +554,8 @@ private fun MarkdownTextPreview() {
             text = """
                 # Heading
 
-                A paragraph with **bold**, *italic* and `inline code` plus a [link](https://example.com).
+                A paragraph with **bold**, *italic* and `inline code` plus a [link](https://example.com)
+                and a bare https://example.org/docs?ref=42 reference.
 
                 - first item
                 - second item

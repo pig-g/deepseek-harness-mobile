@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Warning
@@ -21,13 +22,16 @@ import androidx.compose.material3.Text
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -46,21 +50,27 @@ import java.util.Locale
  * in the light theme, and `userBubble` is `#EDF3FE` — a 1.06:1 ratio against it. The bubble was
  * being drawn and read as plain text. `borderL2` gives it an edge in both themes without moving off
  * the harness's own fill token.
+ *
+ * The text is selectable (long-press) and any bare `http(s)` URL is tappable.
  */
 @Composable
 fun UserBubble(text: String, modifier: Modifier = Modifier) {
     val colors = DsTheme.colors
+    val linkStyle = SpanStyle(color = colors.accent, textDecoration = TextDecoration.LineThrough)
+    val result = remember(text, linkStyle) { linkifyUrls(text, linkStyle) }
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
-        Text(
-            text,
-            style = DsType.bubbleText,
-            color = colors.labelPrimary,
-            modifier = Modifier
-                .widthIn(max = 320.dp)
-                .background(colors.userBubble, DsShapes.bubble)
-                .border(1.dp, colors.borderL2, DsShapes.bubble)
-                .padding(horizontal = 16.dp, vertical = 10.dp),
-        )
+        SelectionContainer {
+            SelectableText(
+                result.text,
+                result.links,
+                style = DsType.bubbleText.copy(color = colors.labelPrimary),
+                modifier = Modifier
+                    .widthIn(max = 320.dp)
+                    .background(colors.userBubble, DsShapes.bubble)
+                    .border(1.dp, colors.borderL2, DsShapes.bubble)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            )
+        }
     }
 }
 
