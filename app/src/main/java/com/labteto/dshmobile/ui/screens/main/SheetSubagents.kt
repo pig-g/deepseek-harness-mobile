@@ -32,6 +32,7 @@ import com.labteto.dshmobile.R
 import com.labteto.dshmobile.core.session.AssistantMessageNode
 import com.labteto.dshmobile.core.session.ChatNode
 import com.labteto.dshmobile.core.session.ConversationSnapshot
+import com.labteto.dshmobile.core.session.ContextMessageNode
 import com.labteto.dshmobile.core.session.UserMessageNode
 import com.labteto.dshmobile.core.wire.dto.SubagentListEntry
 import com.labteto.dshmobile.data.SessionStore
@@ -40,6 +41,8 @@ import com.labteto.dshmobile.ui.components.DsButton
 import com.labteto.dshmobile.ui.components.DsButtonSize
 import com.labteto.dshmobile.ui.components.DsButtonVariant
 import com.labteto.dshmobile.ui.components.DsPill
+import com.labteto.dshmobile.ui.components.DisclosureRow
+import com.labteto.dshmobile.ui.components.FeatherIcons
 import com.labteto.dshmobile.ui.components.MarkdownText
 import com.labteto.dshmobile.ui.components.StateDot
 import com.labteto.dshmobile.ui.components.StateDotState
@@ -204,6 +207,26 @@ private fun SubagentRow(entry: SubagentListEntry, selected: Boolean, onClick: ()
 private fun SubagentTranscriptRow(node: ChatNode) {
     when (node) {
         is UserMessageNode -> UserBubble(node.previewText)
+        is ContextMessageNode -> {
+            // System-injected context (the child's delegation snapshot): a quiet disclosure row,
+            // not a user bubble.
+            val sheetColors = DsTheme.colors
+            var expanded by remember(node.seq) { mutableStateOf(false) }
+            DisclosureRow(
+                title = stringResource(R.string.chat_context_title),
+                summary = node.sections.take(4).map { it.name }.joinToString(" · ").ifBlank { node.form },
+                icon = FeatherIcons.Info,
+                expanded = expanded,
+                onToggle = { expanded = !expanded },
+            ) {
+                Column(Modifier.padding(start = 28.dp, top = 2.dp)) {
+                    node.sections.forEach { section ->
+                        Text(section.name, style = DsType.caption11, color = sheetColors.labelCaption)
+                        Text(section.text, style = DsType.small13, color = sheetColors.labelSecondary)
+                    }
+                }
+            }
+        }
         is AssistantMessageNode -> if (node.plainText.isNotBlank()) MarkdownText(node.plainText)
         else -> Unit
     }

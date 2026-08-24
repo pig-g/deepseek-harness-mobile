@@ -111,7 +111,7 @@
 
 ### 5.2 "알림 메시지" = 정상 (지연 원인 아님)
 - `session.jsonl` 첫 답변 전에 보이는 큰 텍스트는 하네스가 모델 호출 직전 주입하는 **런타임 컨텍스트 스냅샷** (`@deepseek-ai/dsh-system-prompt`, `form:"snapshot"`).
-- **지연 원인 아님.** 앱이 이를 "일반 사용자 메시지"처럼 큰 버블로 그려서 사용자가 '이상한 알림'으로 인식. (UX 개선 가능 — 미진행)
+- **지연 원인 아님.** 앱이 이를 "일반 사용자 메시지"처럼 큰 버블로 그려서 사용자가 '이상한 알림'으로 인식 → **UX 해결 완료 (섹션 11.6)**: plugin-source `user/message`는 거대 버블이 아니라 접을 수 있는 "Context" disclosure 행으로 렌더(숨김이 아닌 컴팩트 표시, 사용자 결정).
 
 ### 5.3 이전 가설 (다운링크 안정성) — **근본 원인이 아님, 보조 개선으로 유지**
 - `events.mux` 다운링크 끊김 가설. `pingInterval` 10s, `streamOpenTimeoutMs` 8s 튜닝은 원격 링크 복구 속도 개선으로 유효 유지.
@@ -147,7 +147,7 @@
 3. **[완료 — 보조 개선, 섹션 3.5] 다운링크 안정성 튜닝**: `streamOpenTimeoutMs` 3s→8s, `pingInterval` 20s→10s.
 4. **[완료] 큐-앤-오토-플러시**: RECONNECTING 중 전송 시 메시지 큐잉 후 재접속 시 자동 전송.
 5. **[완료] 진단 로그**: `DSHSend` (send 게이트별), `DSHConn` (phase 변경, generation 실패, session/subscribed).
-6. **[옵션] UX 개선**: "runtime-context 스냅샷" user/message를 버블에서 숨기기(plugin source `@deepseek-ai/dsh-system-prompt` 필터). 미진행.
+6. **[완료 — 사용자 실기기 검증됨] UX 개선 — 섹션 11.6/11.7 참조**: (a) "runtime-context 스냅샷" user/message를 거대 버블 대신 **접을 수 있는 "Context" disclosure 행**으로 렌더(플러그인 source `@deepseek-ai/dsh-system-prompt`, `form:"snapshot"` 판별, 섹션 11.6); (b) `ask_user_question` 모바일 오작동 2건 수정 — 질문 알림 dedup(rpcId 기반) + pending 질문 세션별 Map화(섹션 11.7).
 
 ---
 
@@ -244,4 +244,24 @@
   - `SessionStore.answerQuestions` → **`List<QuestionAnswerEntry>`(id/selected/custom)** 받아 각 항목 안에 `custom`을 넣어 전송(비어있으면 생략). 상위 `custom` 제거. `ChatScreen.kt`의 submit/plan-review/cancel 호출부를 `QuestionAnswerEntry`로 갱신.
 - 검증(라이브 하네스, 에뮬): 새 단일선택 질문(Colors/Red/Blue)에서 탭 선택 없이 Other에 `green` 입력 → Submit → 하네스 세션 로그 `seq437 tool/result`에 **`{"answers":[{"id":"color_pick","selected":[],"custom":"green"}]}`** 기록, 앱 트랜스크립트에 **"Received: custom = green"** 렌더 → 정확히 per-item custom 전달 확인.
 
-**신규 변경 파일**: `AndroidManifest.xml`(adjustNothing), `Composer.kt`(패딩 축소), **`DsButton.kt`(fillMaxSize→fillMaxHeight — 버튼 Row 붕괴 근본 수정)**, `InteractionPanels.kt`(QuestionsPanel bound+scroll **+`currentAnswer` 단일선택 Other→custom 전용), `SessionStore.kt`(`answerQuestions` per-item `custom` / `QuestionAnswerEntry`), `ChatScreen.kt`(followBottomKey 덕-닫힘 hint + `QuestionAnswerEntry` 호출부), `ChatTranscript.kt`(followHint + bottom-anchor 스크롤 + 스트리밍 폴링), 새 `app/src/androidTest/.../ui/components/QuestionsPanelTest.kt`(smoke guard). 빌드/설치/실기기 연결 정상, 크래시 0. **11.1 end-to-end(라이브 하네스) + 11.4(에뮬) + 11.5(라이브 하네스) 검증 완료.**
+**신규 변경 파일**: `AndroidManifest.xml`(adjustNothing), `Composer.kt`(패딩 축소), **`DsButton.kt`(fillMaxSize→fillMaxHeight — 버튼 Row 붕괴 근본 수정)**, `InteractionPanels.kt`(QuestionsPanel bound+scroll **+`currentAnswer` 단일선택 Other→custom 전용), `SessionStore.kt`(`answerQuestions` per-item `custom` / `QuestionAnswerEntry`), `ChatScreen.kt`(followBottomKey 덕-닫힘 hint + `QuestionAnswerEntry` 호출부), `ChatTranscript.kt`(followHint + bottom-anchor 스크롤 + 스트리밍 폴링), 새 `app/src/androidTest/.../ui/components/QuestionsPanelTest.kt`(smoke guard). 빌드/설치/실기기 연결 정상, 크래시 0. **11.1 end-to-end(라이브 하네스) + 11.4(재실행) + 11.5(라이브 하네스) 검증 완료.**
+
+### 11.6 런타임 컨텍스트 스냅샷을 거대 버블 대신 disclosure 행으로 렌더 — **해결 완료 (사용자 실기기 검증)**
+- 배경: 하네스는 샌드박스/승인 정책이 바뀔 때 `user/message` 이벤트로 런타임 컨텍스트 스냅샷을 기록(`source: {kind:"plugin", plugin:"@deepseek-ai/dsh-system-prompt", form:"snapshot", sections:[{name,text}]}`, `RuntimeContextProjection.project()`이 텍스트 변화 시에만 재발행). 앱이 이를 일반 유저 버블로 렌더 → "이상한 알림" UX. 사용자는 숨김이 아닌 **Bash 카드처럼 접을 수 있는 컴팩트 행**을 요구.
+- 수정:
+  - `core/.../session/Conversation.kt`: `ContextSection(name,text)` + `ContextMessageNode(seq, messageId, plugin, form, sections, text)`(`previewText` 포함) 신규 노드.
+  - `core/.../session/EventFold.kt`: `user/message` 분기가 `data.source`(raw JSON — envelope `data`가 `JsonElement`라 와이어 그대로 전달)를 판독, `source.kind == "plugin"`이면 `ContextMessageNode` 생성, 그 외엔 기존 `UserMessageNode`. `parseContextSections()`은 all-or-nothing(배열 아님/필드 누락 시 `emptyList()` → renderer가 raw text 폴백).
+  - `app/.../main/ChatNodeItem.kt`: `ContextDisclosureRow` — 기존 `DisclosureRow` 프리미티브 재사용. 제목 `R.string.chat_context_title`("Context", 새 문자열 없음), 요약=섹션 이름 `" · "` 연결(`sections` 비어 있으면 `form` 폴백), 아이콘 `FeatherIcons.Info`, `remember(node.seq)` 확장 상태. 본문=섹션별 이름+전체 텍스트.
+  - `app/.../main/ChatNodeVisibility.kt`: `rendersContent()` 신규 케이스(exhaustive-when 안전망).
+  - `app/.../main/SheetSubagents.kt`: 서브에이전트 트랜스크립트 시트에 동일한 컴팩트 행.
+- 검증: `:core:test` 56/56 그린(신규 `foldsPluginUserMessageIntoContextNode`, `foldsPluginUserMessageWithoutSections`), `:app:assembleDebug` 그린, **사용자 실기기 확인**(기존 세션의 과거 버블도 fold 재처리라 disclosure 행으로 변환).
+- 함의: §5.2의 "UX 미진행" 및 §7-6의 "숨기기" 옵션은 본 구현(접기)으로 대체됨.
+
+### 11.7 `ask_user_question` 모바일 표시 버그 2건 — **해결 완료 (유닛 검증 + 사용자 실기기 확인)**
+- 사용자 보고: 질문 UI가 모바일에 안 뜨고, 서버는 유저 결정을 기다리는 상태.
+- 서버(하네스) 측 확인 결과 **정상**: root 에이전트만 질문 가능(자식은 `DELEGATED_CALLER`로 거부), `api-proxy.ts`가 `rpcId`를 발급해 `question/requested` mux 프레임을 **모든** 큐에 브로드캐스트 후 POST /api/respond로 답변 대기, 재연결 시 pending 프레임을 같은 rpcId로 재전송(복구 로직 존재). 문제는 **앱이 질문을 받아내는 쪽**이었음.
+- **B1 (중대) — 알림 dedup 버그**: 질문 프레임 페이로드에 `seq` 필드가 없어 dedup 키가 항상 `"question:$sessionId:0"` → **세션당 2번째 질문부터 알림/뱃지가 조용히 전부 사라짐**. 수정: `CompletionClassifier.QuestionRequested`에 `rpcId` 추가, 키 `"question:$sessionId:$rpcId"`; `NotificationObserver.handleMuxFrame`이 `frame.rpcId` 전달. (재전송 플레이는 같은 rpcId라 중복 알림 억제 — 의도적. 새 질문은 새 rpcId라 정상 알림.)
+- **B2 — pending 단일 슬롯 덮어쓰기**: `SessionStore._pendingQuestions`가 질문 1개만 저장 → 세션 여러 개일 때 도크에 잘못된 세션의 질문 표시/새 질문이 기존 질문 덮어씀. 수정: `StateFlow<Map<sessionId, PendingQuestions>>`, `ChatScreen` 도크는 `pendingQuestions[currentSessionId]`만 렌더, `onSessionRemoved`에서 map 엔트리도 정리.
+- **B3 (아키텍처 한계, 미해결 고지)**: 앱 프로세스가 종료/백그라운드에서 죽으면 push 채널이 없어 질문을 알 수 없음. 재접속 시 서버 재전송으로 복구. 근본 해결은 푸시(FCM 등) 필요. 참고: 승인 `_pendingApproval`에도 동일한 단일 슬롯 패턴이 대칭으로 존재(이번 범위 밖).
+- 검증: `:core:test` 그린(신규 `secondQuestionOfSameSessionKeepsADistinctDedupKey`, `questionRequestedFires` rpcId dedupKey assertion), `:app:assembleDebug` 그린, 사용자 실기기에서 질문이 정상 표시 확인(2026-08-24).
+- **신규 변경 파일(11.6+11.7)**: `core/.../session/Conversation.kt`, `core/.../session/EventFold.kt`, `core/.../notify/CompletionClassifier.kt`, `app/.../main/ChatNodeItem.kt`, `app/.../main/ChatNodeVisibility.kt`, `app/.../main/SheetSubagents.kt`, `app/.../notify/NotificationObserver.kt`, `app/.../data/SessionStore.kt`, `app/.../main/ChatScreen.kt`, 테스트 `core/src/test/.../session/EventFoldTest.kt`, `core/src/test/.../notify/CompletionClassifierTest.kt`.

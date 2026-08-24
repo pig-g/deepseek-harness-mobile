@@ -82,9 +82,27 @@ class CompletionClassifierTest {
                 add(buildJsonObject { put("id", "q1"); put("question", "which one?") })
             }
         }
-        val result = classifier.classifyMux("question/requested", frame)
+        val result = classifier.classifyMux("question/requested", frame, "rpc-1")
         assertTrue(result is CompletionEvent.QuestionRequested)
         assertEquals("which one?", (result as CompletionEvent.QuestionRequested).firstQuestion)
+        assertEquals("question:s1:rpc-1", result!!.dedupKey)
+    }
+
+    /**
+     * The `question/requested` payload carries no seq, so the dedup unit is the envelope rpcId:
+     * the second question of the same session must not dedup onto the first one's notification.
+     */
+    @Test
+    fun secondQuestionOfSameSessionKeepsADistinctDedupKey() {
+        val frame = buildJsonObject {
+            put("sessionId", "s1")
+            putJsonArray("questions") {
+                add(buildJsonObject { put("id", "q1"); put("question", "which one?") })
+            }
+        }
+        val first = classifier.classifyMux("question/requested", frame, "rpc-1")!!
+        val second = classifier.classifyMux("question/requested", frame, "rpc-2")!!
+        assertTrue(first.dedupKey != second.dedupKey)
     }
 
     @Test

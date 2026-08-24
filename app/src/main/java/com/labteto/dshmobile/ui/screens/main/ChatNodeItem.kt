@@ -38,6 +38,7 @@ import com.labteto.dshmobile.core.session.AssistantMessageNode
 import com.labteto.dshmobile.core.session.ChatNode
 import com.labteto.dshmobile.core.session.CommandNode
 import com.labteto.dshmobile.core.session.CompactionNode
+import com.labteto.dshmobile.core.session.ContextMessageNode
 import com.labteto.dshmobile.core.session.GoalNode
 import com.labteto.dshmobile.core.session.OtherNode
 import com.labteto.dshmobile.core.session.PlanModeNode
@@ -107,6 +108,8 @@ internal fun ChatNodeItem(node: ChatNode, context: ChatNodeContext) {
             val text = node.displayText()
             if (text.isNotBlank()) UserBubble(text)
         }
+
+        is ContextMessageNode -> ContextDisclosureRow(node)
 
         is AssistantMessageNode -> AssistantMessage(node, context)
 
@@ -361,6 +364,42 @@ private fun ToolCallRow(node: ToolCallNode, context: ChatNodeContext) {
             color = colors.error,
             modifier = Modifier.padding(start = 26.dp),
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context (plugin-sourced user messages, e.g. the runtime-context snapshot)
+// ---------------------------------------------------------------------------
+
+/**
+ * One plugin-sourced `user/message` as a compact, collapsible disclosure row — the mobile
+ * counterpart of the web client's context disclosure. The collapsed row names the snapshot's
+ * sections so the reader sees what the model's context changed without expanding; the expanded
+ * body prints each section's text as the model read it.
+ */
+@Composable
+private fun ContextDisclosureRow(node: ContextMessageNode) {
+    val colors = DsTheme.colors
+    var expanded by remember(node.seq) { mutableStateOf(false) }
+    val summary = node.sections.take(4).map { it.name }.joinToString(" · ")
+    DisclosureRow(
+        title = stringResource(R.string.chat_context_title),
+        summary = summary.ifBlank { node.form },
+        icon = FeatherIcons.Info,
+        expanded = expanded,
+        onToggle = { expanded = !expanded },
+    ) {
+        Column(Modifier.padding(start = 28.dp, top = 2.dp)) {
+            if (node.sections.isNotEmpty()) {
+                node.sections.forEach { section ->
+                    Text(section.name, style = DsType.caption11, color = colors.labelCaption)
+                    Text(section.text, style = DsType.small13, color = colors.labelSecondary)
+                    Spacer(Modifier.height(6.dp))
+                }
+            } else {
+                node.text?.let { Text(it, style = DsType.caption11, color = colors.labelSecondary) }
+            }
+        }
     }
 }
 

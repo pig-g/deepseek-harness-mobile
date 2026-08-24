@@ -64,8 +64,10 @@ class NotificationObserver @Inject constructor(
 
     private fun handleMuxFrame(frame: ServerRequest) {
         val payload = frame.payload as? JsonObject ?: return
-        // approval/requested and question/requested classify straight off the method.
-        classifier.classifyMux(frame.method, payload)?.let { maybeNotify(it) }
+        // approval/requested and question/requested classify straight off the method. The
+        // envelope rpcId rides along: the question payload has no seq of its own, and the rpcId
+        // is what keeps each question instance from deduping onto the previous one.
+        classifier.classifyMux(frame.method, payload, frame.rpcId)?.let { maybeNotify(it) }
 
         if (frame.method == "session/event") {
             val sessionId = payload["sessionId"]?.jsonPrimitive?.contentOrNull ?: return

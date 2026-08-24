@@ -43,8 +43,12 @@ sealed interface CompletionEvent {
         override val sessionId: String,
         override val seq: Long,
         val firstQuestion: String?,
+        val rpcId: String? = null,
     ) : CompletionEvent {
-        override val dedupKey: String get() = "question:$sessionId:$seq"
+        // The `question/requested` frame payload carries no seq, so the frame's server-request
+        // id — unique per question instance, stable across reconnect replays — is the dedup unit.
+        // Keying on seq (always 0) used to silence every question after the first per session.
+        override val dedupKey: String get() = "question:$sessionId:${rpcId ?: seq}"
     }
 
     /** A session that was running stopped (fallback completion signal). */
@@ -93,8 +97,13 @@ class CompletionClassifier {
         }
     }
 
-    /** Classify a mux-frame (method + payload object, sessionId inside). */
-    fun classifyMux(method: String, payload: JsonObject): CompletionEvent? {
+    /**
+     * Classify a mux-frame (method + payload object, sessionId inside).
+     *
+     * [rpcId] is the envelope's server-request id: the `question/requested` payload has no seq,
+     * so the rpcId is what makes each question instance a distinct notification.
+     */
+    fun classifyMux(method: String, payload: JsonObject, rpcId: String? = null): CompletionEvent? {
         val sessionId = payload["sessionId"]?.jsonPrimitive?.contentOrNull ?: return null
         val seq = payload["seq"]?.jsonPrimitive?.let { runCatching { it.content.toLong() }.getOrNull() } ?: 0L
         return when (method) {
@@ -111,6 +120,7 @@ class CompletionClassifier {
                 seq = seq,
                 firstQuestion = (payload["questions"] as? kotlinx.serialization.json.JsonArray)
                     ?.firstOrNull()?.jsonObject?.get("question")?.jsonPrimitive?.contentOrNull,
+                rpcId = rpcId,
             )
 
             else -> null

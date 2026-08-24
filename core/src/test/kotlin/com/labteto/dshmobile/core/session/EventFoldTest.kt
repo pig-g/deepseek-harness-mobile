@@ -133,6 +133,73 @@ class EventFoldTest {
     }
 
     /**
+     * A plugin-sourced `user/message` (the runtime-context snapshot) folds to a
+     * [ContextMessageNode] with the durable sections, not a [UserMessageNode] bubble.
+     */
+    @Test
+    fun foldsPluginUserMessageIntoContextNode() {
+        val events = listOf(
+            event("user/message", 1, buildJsonObject {
+                put("id", "ctx-1")
+                putJsonArray("content") {
+                    add(buildJsonObject {
+                        put("type", "text")
+                        put("text", "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.")
+                    })
+                }
+                putJsonObject("source") {
+                    put("kind", "plugin")
+                    put("plugin", "@deepseek-ai/dsh-system-prompt")
+                    put("form", "snapshot")
+                    putJsonArray("sections") {
+                        add(buildJsonObject {
+                            put("name", "sandbox:policy")
+                            put("text", "Current DSH file policy: workspace-write.")
+                        })
+                        add(buildJsonObject {
+                            put("name", "approval:policy")
+                            put("text", "Approval policy: ask.")
+                        })
+                    }
+                }
+            }),
+        )
+        val snapshot = EventFold("s1").fold(events)
+        val node = snapshot.nodes.single() as ContextMessageNode
+        assertEquals("@deepseek-ai/dsh-system-prompt", node.plugin)
+        assertEquals("snapshot", node.form)
+        assertEquals(2, node.sections.size)
+        assertEquals("sandbox:policy", node.sections[0].name)
+        assertEquals("Current DSH file policy: workspace-write.", node.sections[0].text)
+        assertEquals("Approval policy: ask.", node.sections[1].text)
+        assertEquals(
+            "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.",
+            node.text,
+        )
+        assertFalse(snapshot.blank)
+    }
+
+    /**
+     * A plugin-sourced message without a usable section list still folds to a [ContextMessageNode]
+     * (with the model-facing text for the opaque fallback), never to a user bubble.
+     */
+    @Test
+    fun foldsPluginUserMessageWithoutSections() {
+        val events = listOf(
+            event("user/message", 1, buildJsonObject {
+                put("id", "ctx-2")
+                putJsonArray("content") {
+                    add(buildJsonObject { put("type", "text"); put("text", "You are a delegated subagent.") })
+                }
+                putJsonObject("source") { put("kind", "plugin"); put("plugin", "@deepseek-ai/dsh-system-prompt") }
+            }),
+        )
+        val node = EventFold("s1").fold(events).nodes.single() as ContextMessageNode
+        assertTrue(node.sections.isEmpty())
+        assertEquals("You are a delegated subagent.", node.text)
+    }
+
+    /**
      * A build that sends `content` as a bare string instead of a block array used to fold to no
      * blocks at all — the user's own message would disappear from the transcript rather than render
      * imperfectly, which is the opposite of the fold's leniency contract everywhere else.

@@ -44,6 +44,32 @@ data class UserMessageNode(
         get() = blocks.firstOrNull { it.kind == "text" }?.text?.take(120) ?: ""
 }
 
+/** One named contribution to a context snapshot, as the durable `source.sections` records it. */
+data class ContextSection(
+    val name: String,
+    val text: String,
+)
+
+/**
+ * A `user/message` recorded by a plugin (e.g. the runtime-context snapshot from
+ * `@deepseek-ai/dsh-system-prompt`) rather than typed by a person.
+ *
+ * Rendered as a compact, collapsible context disclosure row — never as a user speech bubble.
+ * `sections` is empty when the producer declared no usable section list (opaque form), in which
+ * case the renderer falls back to the model-facing [text].
+ */
+data class ContextMessageNode(
+    override val seq: Long,
+    val messageId: String?,
+    val plugin: String?,
+    val form: String?,
+    val sections: List<ContextSection>,
+    val text: String?,
+) : ChatNode {
+    val previewText: String
+        get() = sections.firstOrNull()?.text?.take(120) ?: text?.take(120).orEmpty()
+}
+
 data class AssistantMessageNode(
     override val seq: Long,
     val messageId: String?,

@@ -121,8 +121,26 @@ private class FoldState(private val sessionId: String) {
             "user/message" -> {
                 blank = false
                 val messageId = data.jsonObject["id"]?.jsonPrimitive?.contentOrNull
-                val sourceKind = (data.jsonObject["source"] as? JsonObject)?.get("kind")?.jsonPrimitive?.contentOrNull
-                nodes.add(UserMessageNode(event.seq, messageId, parseBlocks(data.jsonObject["content"]), sourceKind))
+                val source = data.jsonObject["source"] as? JsonObject
+                val sourceKind = source?.get("kind")?.jsonPrimitive?.contentOrNull
+                val blocks = parseBlocks(data.jsonObject["content"])
+                if (sourceKind == "plugin") {
+                    // System-injected context (e.g. the runtime-context snapshot): the durable
+                    // source declares the producer and the snapshot sections; the transcript
+                    // renders it as a disclosure row, not a user bubble.
+                    nodes.add(
+                        ContextMessageNode(
+                            seq = event.seq,
+                            messageId = messageId,
+                            plugin = source?.get("plugin")?.jsonPrimitive?.contentOrNull,
+                            form = source?.get("form")?.jsonPrimitive?.contentOrNull,
+                            sections = parseContextSections(source?.get("sections")),
+                            text = blocks.filter { it.kind == "text" }.joinToString("") { it.text.orEmpty() }.ifBlank { null },
+                        ),
+                    )
+                } else {
+                    nodes.add(UserMessageNode(event.seq, messageId, blocks, sourceKind))
+                }
             }
 
             "assistant/chunk" -> {
@@ -291,6 +309,25 @@ private class FoldState(private val sessionId: String) {
                 else -> ChatBlock("unknown", raw = element)
             }
         }
+    }
+
+    /**
+     * Snapshot sections read off the durable `source.sections` array, or an empty list when the
+     * producer declared none (or the record is not a usable list) — the renderer then falls back
+     * to the model-facing text. All-or-nothing, mirroring the web client's section read: a partial
+     * list would present a confident, incomplete view of what the model read.
+     */
+    private fun parseContextSections(element: JsonElement?): List<ContextSection> {
+        val array = element as? JsonArray ?: return emptyList()
+        val sections = mutableListOf<ContextSection>()
+        for (item in array) {
+            val obj = item as? JsonObject ?: return emptyList()
+            val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: return emptyList()
+            val text = obj["text"]?.jsonPrimitive?.contentOrNull ?: return emptyList()
+            if (name.isEmpty()) return emptyList()
+            sections.add(ContextSection(name, text))
+        }
+        return sections
     }
 
     private fun markInterrupted(turn: Int) {

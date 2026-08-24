@@ -4,6 +4,7 @@ import com.labteto.dshmobile.core.session.AssistantMessageNode
 import com.labteto.dshmobile.core.session.ChatNode
 import com.labteto.dshmobile.core.session.CommandNode
 import com.labteto.dshmobile.core.session.CompactionNode
+import com.labteto.dshmobile.core.session.ContextMessageNode
 import com.labteto.dshmobile.core.session.GoalNode
 import com.labteto.dshmobile.core.session.OtherNode
 import com.labteto.dshmobile.core.session.PlanModeNode
@@ -59,6 +60,7 @@ internal fun ChatNode.rendersContent(): Boolean = when (this) {
 
     // Content that can still fold to nothing.
     is UserMessageNode -> blocks.any { it.kind == "image" } || displayText().isNotBlank()
+    is ContextMessageNode -> sections.isNotEmpty() || text.isNullOrBlank().not()
     is AssistantMessageNode -> interrupted || blocks.any { block ->
         when (block.kind) {
             // Tool calls arrive as their own nodes; the inline block is a duplicate reference.

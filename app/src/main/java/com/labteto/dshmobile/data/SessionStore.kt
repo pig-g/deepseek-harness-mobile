@@ -259,8 +259,9 @@ class SessionStore @Inject constructor(
     private val _pendingApproval = MutableStateFlow<PendingApproval?>(null)
     val pendingApproval: StateFlow<PendingApproval?> = _pendingApproval.asStateFlow()
 
-    private val _pendingQuestions = MutableStateFlow<PendingQuestions?>(null)
-    val pendingQuestions: StateFlow<PendingQuestions?> = _pendingQuestions.asStateFlow()
+    /** One pending batch per session — a single slot used to drop an earlier session's dock. */
+    private val _pendingQuestions = MutableStateFlow<Map<String, PendingQuestions>>(emptyMap())
+    val pendingQuestions: StateFlow<Map<String, PendingQuestions>> = _pendingQuestions.asStateFlow()
 
     private val _commands = MutableStateFlow<List<CommandDescriptor>>(emptyList())
     val commands: StateFlow<List<CommandDescriptor>> = _commands.asStateFlow()
@@ -546,7 +547,8 @@ class SessionStore @Inject constructor(
             addPendingLocked(frame.sessionId, kind)
             emitSessionsLocked()
         }
-        _pendingQuestions.value = PendingQuestions(frame.sessionId, rpcId, frame.questions)
+        _pendingQuestions.value =
+            _pendingQuestions.value + (frame.sessionId to PendingQuestions(frame.sessionId, rpcId, frame.questions))
     }
 
     private fun handleQuestionResolved(frame: MuxFrame.QuestionResolved) {
@@ -556,7 +558,9 @@ class SessionStore @Inject constructor(
             removePendingLocked(frame.sessionId, "plan-review")
             emitSessionsLocked()
         }
-        if (_pendingQuestions.value?.sessionId == frame.sessionId) _pendingQuestions.value = null
+        if (_pendingQuestions.value.containsKey(frame.sessionId)) {
+            _pendingQuestions.value = _pendingQuestions.value - frame.sessionId
+        }
     }
 
     private fun handleSessionQueue(frame: MuxFrame.SessionQueue) {
@@ -629,6 +633,9 @@ class SessionStore @Inject constructor(
             pendingKinds.remove(sessionId)
             runningBySession.remove(sessionId)
             questionRpcBySession.remove(sessionId)
+            if (_pendingQuestions.value.containsKey(sessionId)) {
+                _pendingQuestions.value = _pendingQuestions.value - sessionId
+            }
             emitSessionsLocked()
         }
     }

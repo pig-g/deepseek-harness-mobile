@@ -122,7 +122,7 @@ fun ChatScreen(
     var hadDockBySession by remember(currentSessionId) { mutableStateOf<String?>(null) }
     LaunchedEffect(pendingQuestions, pendingApproval, currentSessionId) {
         val dock = when {
-            pendingQuestions?.sessionId == currentSessionId -> pendingQuestions?.sessionId
+            currentSessionId != null && pendingQuestions.containsKey(currentSessionId) -> currentSessionId
             pendingApproval?.sessionId == currentSessionId -> pendingApproval?.sessionId
             else -> null
         }
@@ -334,8 +334,8 @@ fun ChatScreen(
                     },
                 )
             }
-            val questions = pendingQuestions
-            if (questions != null && questions.sessionId == currentSessionId) {
+            val questions = currentSessionId?.let { pendingQuestions[it] }
+            if (questions != null) {
                 val planReview = questions.items.firstOrNull {
                     it.intent is AskUserQuestionIntent.PlanReview
                 }
