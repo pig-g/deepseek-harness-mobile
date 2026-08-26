@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -44,6 +45,7 @@ import com.labteto.dshmobile.connection.AppSettings
 import com.labteto.dshmobile.connection.ConnectionPhase
 import com.labteto.dshmobile.connection.ConnectionUiState
 import com.labteto.dshmobile.core.DshCore
+import com.labteto.dshmobile.data.SettingsPlane
 import com.labteto.dshmobile.ui.components.DsButton
 import com.labteto.dshmobile.ui.components.DsButtonVariant
 import com.labteto.dshmobile.ui.components.DsDialog
@@ -53,6 +55,7 @@ import com.labteto.dshmobile.ui.components.SectionHeader
 import com.labteto.dshmobile.ui.components.StateDot
 import com.labteto.dshmobile.ui.components.StateDotState
 import com.labteto.dshmobile.ui.components.rememberDsToast
+import com.labteto.dshmobile.ui.screens.harness.HarnessSettingsScreen
 import com.labteto.dshmobile.ui.theme.DsShapes
 import com.labteto.dshmobile.ui.theme.DsSpacing
 import com.labteto.dshmobile.ui.theme.DsTheme
@@ -70,9 +73,11 @@ import com.labteto.dshmobile.ui.theme.DsType
 fun SettingsScreen(onClose: () -> Unit, viewModel: SettingsViewModel = hiltViewModel()) {
     val settings by viewModel.state.collectAsStateWithLifecycle()
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
+    val planeUi by viewModel.planeUi.collectAsStateWithLifecycle()
     val colors = DsTheme.colors
     val toast = rememberDsToast()
     var showDisconnectDialog by remember { mutableStateOf(false) }
+    var showHarness by remember { mutableStateOf(false) }
     BackHandler(onBack = onClose)
 
     val hostsCleared = stringResource(R.string.settings_forget_hosts_done)
@@ -155,12 +160,29 @@ fun SettingsScreen(onClose: () -> Unit, viewModel: SettingsViewModel = hiltViewM
                             stringResource(R.string.subagents_title),
                             stringResource(R.string.connect_attached_sessions, host.attachedSessions),
                         )
+                        // The harness's own settings, one screen deep: the web GUI's tabs, native.
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showHarness = true }
+                                .padding(vertical = DsSpacing.xsmall),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                stringResource(R.string.hset_entry),
+                                style = DsType.std14,
+                                color = colors.labelSecondary,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Icon(
+                                Icons.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = colors.labelCaption,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
                     }
-                    Text(
-                        stringResource(R.string.settings_readonly_banner),
-                        style = DsType.caption11,
-                        color = colors.warnLabel,
-                    )
+                    HarnessPlaneBanner(planeUi)
                 }
 
                 SettingsCard(stringResource(R.string.settings_data)) {
@@ -196,6 +218,10 @@ fun SettingsScreen(onClose: () -> Unit, viewModel: SettingsViewModel = hiltViewM
         }
     }
 
+    if (showHarness) {
+        HarnessSettingsScreen(onClose = { showHarness = false })
+    }
+
     if (showDisconnectDialog) {
         DsDialog(
             title = stringResource(R.string.settings_connection_disconnect_confirm),
@@ -228,6 +254,35 @@ fun SettingsScreen(onClose: () -> Unit, viewModel: SettingsViewModel = hiltViewM
 }
 
 /** One settings group as a raised card, so groups read as blocks rather than a running list. */
+/**
+ * The harness card's plane status line: what the link can do to the harness's own settings.
+ * The wording follows the mirror's answer, not the app's own preferences.
+ */
+@Composable
+private fun HarnessPlaneBanner(planeUi: SettingsPlane.PlaneUi) {
+    val colors = DsTheme.colors
+    val (text, warn) = when (planeUi.status) {
+        is SettingsPlane.PlaneStatus.Ready ->
+            if (planeUi.writable) {
+                stringResource(R.string.hset_edit_available) to false
+            } else {
+                stringResource(R.string.settings_readonly_banner) to true
+            }
+        is SettingsPlane.PlaneStatus.Refused ->
+            if (planeUi.refusal == SettingsPlane.Refusal.Unsupported) {
+                stringResource(R.string.hset_unsupported_banner) to true
+            } else {
+                stringResource(R.string.hset_refused_banner) to true
+            }
+        else -> stringResource(R.string.settings_readonly_banner) to true
+    }
+    Text(
+        text,
+        style = DsType.caption11,
+        color = if (warn) colors.warnLabel else colors.labelTertiary,
+    )
+}
+
 @Composable
 private fun SettingsCard(title: String, content: @Composable () -> Unit) {
     val colors = DsTheme.colors

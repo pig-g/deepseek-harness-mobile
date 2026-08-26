@@ -6,6 +6,7 @@ import com.labteto.dshmobile.connection.AppSettings
 import com.labteto.dshmobile.connection.ConnectionManager
 import com.labteto.dshmobile.connection.ConnectionUiState
 import com.labteto.dshmobile.connection.HostsStore
+import com.labteto.dshmobile.data.SettingsPlane
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -44,6 +45,7 @@ val LanguageOptions = listOf(
 class SettingsViewModel @Inject constructor(
     private val hostsStore: HostsStore,
     private val connectionManager: ConnectionManager,
+    private val plane: SettingsPlane,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AppSettings())
@@ -54,6 +56,9 @@ class SettingsViewModel @Inject constructor(
         SharingStarted.Eagerly,
         ConnectionUiState()
     )
+
+    /** The configuration-plane mirror, so the harness card can say what the link can edit. */
+    val planeUi: StateFlow<SettingsPlane.PlaneUi> = plane.ui
 
     init {
         viewModelScope.launch {

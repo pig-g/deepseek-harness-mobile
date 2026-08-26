@@ -42,6 +42,8 @@ import com.labteto.dshmobile.core.wire.dto.LlmDiscoverModelsRequest
 import com.labteto.dshmobile.core.wire.dto.LlmDiscoverModelsValue
 import com.labteto.dshmobile.core.wire.dto.LlmModelsValue
 import com.labteto.dshmobile.core.wire.dto.LlmProvidersValue
+import com.labteto.dshmobile.core.wire.dto.PluginInventoryEntry
+import com.labteto.dshmobile.core.wire.dto.PluginInventorySnapshot
 import com.labteto.dshmobile.core.wire.dto.SessionAttachmentRequest
 import com.labteto.dshmobile.core.wire.dto.SessionAttachmentValue
 import com.labteto.dshmobile.core.wire.dto.SessionCancelRequest
@@ -108,6 +110,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.put
 import kotlinx.serialization.serializer
 
@@ -477,9 +480,26 @@ class DshApiClient(
             },
         )
 
-    /** pluginInventory/list — the host's composed-plugin inventory (read-only). */
-    suspend fun pluginInventoryList(): RpcResult<JsonElement> =
-        remote("pluginInventory", "list", JsonObject(emptyMap()))
+    /**
+     * pluginInventory/list — the host's composed-plugin inventory (read-only).
+     *
+     * Entries are decoded individually so one unfamiliar row (e.g. a fiber phase this build does
+     * not know) drops out instead of emptying the list. This remote is not privileged: a plain
+     * LAN connection reads it even when the settings plane is refused (see [remote]).
+     */
+    suspend fun pluginInventoryList(): RpcResult<PluginInventorySnapshot> {
+        val args = buildJsonObject { }
+        return when (val result = remote("pluginInventory", "list", args)) {
+            is RpcResult.Ok -> RpcResult.Ok(
+                PluginInventorySnapshot(
+                    (result.value as? JsonObject)?.get("entries")?.jsonArray.orEmpty().mapNotNull { row ->
+                        runCatching { decodeFromJsonElement(PluginInventoryEntry.serializer(), row) }.getOrNull()
+                    },
+                ),
+            )
+            is RpcResult.Err -> result
+        }
+    }
 
     /**
      * session.export — streams the session-log ZIP.

@@ -1,5 +1,6 @@
 package com.labteto.dshmobile.core.wire
 
+import com.labteto.dshmobile.core.wire.dto.PluginFiberPhase
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import kotlinx.coroutines.test.runTest
@@ -125,6 +126,71 @@ class DshApiClientRemoteTest {
 
         val commands = (result as RpcResult.Ok).value
         assertEquals(listOf("plan", "compact"), commands.map { it.name })
+    }
+
+    @Test
+    fun `plugin inventory list posts an empty args object and decodes entries`() = runTest {
+        val transport = RecordingTransport { _, body ->
+            val rpcId = Json.parseToJsonElement(body).jsonObject["rpcId"]!!.jsonPrimitive.content
+            ok(
+                rpcId,
+                """{"entries":[
+                    {"entryId":"deepseek-harness/web","moduleName":"@deepseek-ai/dsh-web","enabled":true,"fiberPhase":"active"},
+                    {"entryId":"deepseek-harness/off","moduleName":"@deepseek-ai/dsh-off","enabled":false,"fiberPhase":null}
+                ]}""",
+            )
+        }
+        val result = client(transport).pluginInventoryList()
+
+        assertEquals("/api/pluginInventory/list", transport.lastPath)
+        val args = Json.parseToJsonElement(transport.lastBody!!)
+            .jsonObject["payload"]!!.jsonObject["args"]!!.jsonObject
+        assertEquals(emptySet<String>(), args.keys)
+
+        val snapshot = (result as RpcResult.Ok).value
+        assertEquals(2, snapshot.entries.size)
+        assertEquals(PluginFiberPhase.Active, snapshot.entries[0].fiberPhase)
+        assertEquals("deepseek-harness/off", snapshot.entries[1].entryId)
+        assertNull(snapshot.entries[1].fiberPhase)
+    }
+
+    @Test
+    fun `a row with an unknown fiber phase is kept and mapped to Unknown`() = runTest {
+        val transport = RecordingTransport { _, body ->
+            val rpcId = Json.parseToJsonElement(body).jsonObject["rpcId"]!!.jsonPrimitive.content
+            ok(
+                rpcId,
+                """{"entries":[
+                    {"entryId":"a","moduleName":"m-a","enabled":true,"fiberPhase":"loading"},
+                    {"entryId":"b","moduleName":"m-b","enabled":true,"fiberPhase":"brand-new-phase"}
+                ]}""",
+            )
+        }
+        val result = client(transport).pluginInventoryList()
+
+        val snapshot = (result as RpcResult.Ok).value
+        // A future harness phase must not make the row vanish; it reads as Unknown instead.
+        assertEquals(listOf("a", "b"), snapshot.entries.map { it.entryId })
+        assertEquals(PluginFiberPhase.Loading, snapshot.entries[0].fiberPhase)
+        assertEquals(PluginFiberPhase.Unknown, snapshot.entries[1].fiberPhase)
+    }
+
+    @Test
+    fun `a structurally malformed plugin inventory row drops out`() = runTest {
+        val transport = RecordingTransport { _, body ->
+            val rpcId = Json.parseToJsonElement(body).jsonObject["rpcId"]!!.jsonPrimitive.content
+            ok(
+                rpcId,
+                """{"entries":[
+                    {"entryId":"a","moduleName":"m-a","enabled":true,"fiberPhase":"active"},
+                    {"entryId":123,"moduleName":"m-b","enabled":true}
+                ]}""",
+            )
+        }
+        val result = client(transport).pluginInventoryList()
+
+        val snapshot = (result as RpcResult.Ok).value
+        assertEquals(listOf("a"), snapshot.entries.map { it.entryId })
     }
 
     @Test

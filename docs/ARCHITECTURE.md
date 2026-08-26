@@ -30,7 +30,11 @@ app/            Android UI
                   (foreground service), KeepAliveWorker (15-min fallback)
   data/         SessionStore — the live mirror of the harness: session
                   list/workspaces/folds per session, queue/jobs/
-                  projections, approvals/questions, subagent catalog
+                  projections, approvals/questions, subagent catalog;
+                  SettingsPlane — the configuration-plane mirror (settings
+                  document, credentials, provider directory, preset
+                  authoring) with CAS-guarded writes and invalidation from
+                  host remote-events
   notify/       NotificationObserver — classifier → channels, dedup,
                   deep links
   media/        AttachmentImages — LruCache + BitmapFactory decoding of
@@ -40,7 +44,9 @@ app/            Android UI
                   (buttons, disclosure rows, state dots, tool cards,
                   markdown, overlays, bottom sheets, context meter),
                   screens (connect, main shell with Discord-style drawer +
-                  details panel, chat, settings)
+                  details panel, chat, settings, harness settings — the
+                  harness's own settings in four tabs mirroring the web GUI:
+                  general, models, plugins, agent presets)
 
 The chat surface is split by responsibility rather than living in one file:
 ChatScreen (shell) · ChatTopBar (two-row chrome + Chat/Trajectory tabs) ·
@@ -77,7 +83,11 @@ tools/capture/  Node recorder of real harness traffic → conformance fixtures
 - HTTP status is carrier-only; business failures arrive as `ok: false`
   with a typed error code (see `docs/PROTOCOL.md`).
 - The WebSocket streams are **downlink-only** — the client never sends.
-- Settings/credentials/host-native methods are loopback-only by harness
-  design; over LAN the app surfaces them read-only (see
+- Settings/credentials/host-native methods are privileged by harness design:
+  loopback-only unless the harness is started with
+  `--allow-privileged-remote`, in which case the app's harness-settings
+  screens can edit them. Without the flag the same screens degrade to
+  read-only (the non-privileged reads — provider directory, model catalog,
+  plugin inventory, preset roster — still render) (see
   `docs/COMPATIBILITY.md`).
 - Protocol baseline: harness `0.1.0-rc.5` (`core.DshCore.PROTOCOL_BASELINE`).

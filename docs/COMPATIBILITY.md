@@ -19,11 +19,34 @@ protocol baseline and verifies the harness version from `host.describe`.
 - New harness releases are validated with the fixture capture tool
   (`tools/capture`) and the compatibility table above is updated.
 
-## Loopback-only surfaces (by harness design)
+## Privileged surfaces (by harness design)
 
-These methods are refused for LAN clients (403) and are presented read-only
-or hidden:
+These methods are **privileged**: the harness serves them to loopback
+clients by default, and to *any* reachable client only when it is started
+with `--allow-privileged-remote` (which sets
+`servePrivilegedToTrustedHosts`). Without the flag a LAN client receives
+HTTP 403 (surfaced as the `forbidden` error code); when the harness composes
+no such service at all the call 404s (`capability-unavailable`).
 
 - `settings.*`, `credentials.*`, `llm.discoverModels`
 - `host.pickDirectory`, `host.openPath`
 - agent-preset authoring (`agentPreset.read/copy/openDocument/remove`)
+
+The app's **harness settings** screens (General / Models / Plugins / Agent
+presets, under app Settings → Harness) drive these methods. Their behavior
+follows the plane's answer:
+
+- **Writable** (the flag is on, or the client is loopback): full editing —
+  settings writes are CAS-guarded by the namespace revision and retry once
+  on a `settings-conflict`; API keys travel only through
+  `credentials.set` (write-only) and are judged client-side before the
+  write.
+- **Refused** (403/404): the screens degrade to read-only. The
+  *non-privileged* reads keep working and are rendered: the provider
+  directory (`llm.providers`), the model catalog (`llm.models`), the preset
+  roster (`agentPreset.list`), and the plugin inventory
+  (`pluginInventory/list`).
+
+The non-privileged reads above are available to every LAN client with or
+without the flag, so a refused harness still shows what its providers serve
+and which presets exist — it just cannot be edited from the phone.
