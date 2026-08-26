@@ -13,3 +13,4 @@
 keystore.properties
 /capture-output/
 node_modules/
+.kotlin/
