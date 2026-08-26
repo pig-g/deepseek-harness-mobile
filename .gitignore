@@ -14,3 +14,11 @@ keystore.properties
 /capture-output/
 node_modules/
 .kotlin/
+
+# Sandbox workarounds: the home dir is read-only here, so Gradle/Android homes and any
+# AVD copies used to run the emulator live inside the repo. Never commit these.
+.gradle-home/
+.android-home/
+.android/
+.avd-home/
+.emulator_console_auth_token

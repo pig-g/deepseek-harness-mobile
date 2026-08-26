@@ -77,6 +77,7 @@ import java.util.TimeZone
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.jvm.Volatile
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -188,7 +189,18 @@ class SessionStore @Inject constructor(
     private val connectionManager: ConnectionManager,
     private val hostsStore: HostsStore,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    // A `SupervisorJob` only stops a child's *cancellation* from propagating; it does nothing for
+    // an uncaught *exception*. Every frame handler and the gap-repair fetches run on this
+    // multi-threaded scope, so without a handler the first uncaught throw in a reconnect burst
+    // (e.g. a payload the re-encode rejects) would take the whole process down. The handler logs
+    // and lets the loop keep running: one bad frame degrades, it does not kill the session.
+    private val scope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.Default +
+            CoroutineExceptionHandler { _, throwable ->
+                log("uncaught exception in a session coroutine", throwable)
+            },
+    )
     private val lock = Any()
     private val baselineMutex = Mutex()
 

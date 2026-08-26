@@ -37,11 +37,22 @@ fun parseHostFrame(payload: JsonElement): HostFrame? =
  * Convert a typed [SessionEvent] into the raw-envelope shape the fold consumes. `data` is the
  * raw JSON of the event's payload (re-derived from the serializer so it stays a [JsonElement]
  * exactly as the fold expects); `surfaceOp` is stringified for the envelope.
+ *
+ * **Total, by contract.** This is called on the hot path for *every* live `session/event` frame —
+ * including the burst that lands right after a downlink reconnect — from a `Dispatchers.Default`
+ * coroutine that has no `CoroutineExceptionHandler`. The decode side ([parseMuxFrame]) is wrapped
+ * in `runCatching`, but the re-encode below was not: a `data` payload the strict typed serializer
+ * decodes leniently yet refuses to write back (a harness-version drift in an event's payload)
+ * threw here and, with nothing to catch it, took the whole process down while the "Reconnecting…"
+ * banner was up. The re-encode is now guarded the same way the decode is: on a re-encode failure we
+ * fall back to the event's own identity plus an empty `data`, so a single bad event degrades to a
+ * blank row instead of a crash.
  */
 fun sessionEventToEnvelope(event: SessionEvent): SessionEventEnvelope {
-    val json = encodeToJsonElement(SessionEventSerializer, event).jsonObject
-    val data = json["data"] ?: JsonObject(emptyMap())
-    val surfaceOp = json["surfaceOp"]?.let { raw ->
+    val json = runCatching { encodeToJsonElement(SessionEventSerializer, event) }
+        .getOrNull()?.jsonObject
+    val data = json?.get("data") ?: JsonObject(emptyMap())
+    val surfaceOp = json?.get("surfaceOp")?.let { raw ->
         (raw as? JsonPrimitive)?.contentOrNull ?: raw.toString()
     }
     return SessionEventEnvelope(

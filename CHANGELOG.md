@@ -3,6 +3,47 @@
 All notable changes to DSH Mobile are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/); the project uses SemVer.
 
+## [Unreleased]
+
+### Added
+
+- **Harness settings** — a new screen under app Settings → Harness that
+  mirrors the web GUI's settings tabs natively: **General** (default agent
+  preset, default permission mode, web-GUI language and appearance, open the
+  settings document on the host), **Models** (every configurable provider
+  route: API key, base URL, protocol, model catalog with per-row editing and
+  model discovery against the endpoint, add/remove providers, custom pi-ai
+  routes), **Plugins** (shell / agent-loop / web-search cards plus the
+  composed-plugin inventory), and **Agent presets** (roster with set
+  default, view source, copy, delete).
+- The settings plane degrades by the harness's answer: a harness started
+  without `--allow-privileged-remote` refuses the privileged writes (403)
+  and the screens fall back to read-only, while the non-privileged reads
+  (provider directory, model catalog, preset roster, plugin inventory) keep
+  rendering. Writes are CAS-guarded by the namespace revision and retry once
+  on a `settings-conflict`; API keys travel only through the write-only
+  `credentials.set` and are validated client-side (quoted or
+  environment-line pastes are rejected).
+- `pluginInventory/list` is now a typed read in the core wire client
+  (`PluginInventorySnapshot`), decoded leniently row by row.
+
+### Fixed
+
+- **Crash during "Reconnecting…"** — the gap-repair work (the fix for the
+  sticky Reconnecting banner) made the store re-encode every live
+  `session/event` through the strict typed serializers on the hot path,
+  including the burst that lands right after a downlink reconnect. That
+  re-encode was unguarded while the matching decode was wrapped in
+  `runCatching`, and it ran on a `Dispatchers.Default` scope with no
+  `CoroutineExceptionHandler` — so the first reconnect-burst event whose
+  payload the serializer decoded leniently but refused to write back (a
+  harness-version drift in an event's `data`) threw uncaught and killed the
+  whole process while the Reconnecting banner was up. `sessionEventToEnvelope`
+  is now total (a re-encode failure degrades to the event's identity plus an
+  empty `data` instead of throwing), and the store's scope carries a
+  `CoroutineExceptionHandler` so no future uncaught throw in a frame or
+  repair coroutine can take the session down.
+
 ## [0.2.0]
 
 ### Added
