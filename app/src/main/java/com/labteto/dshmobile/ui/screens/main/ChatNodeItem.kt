@@ -368,23 +368,27 @@ private fun ToolCallRow(node: ToolCallNode, context: ChatNodeContext) {
 }
 
 // ---------------------------------------------------------------------------
-// Context (plugin-sourced user messages, e.g. the runtime-context snapshot)
+// Context (non-user-sourced user messages: runtime-context snapshots,
+// <system-reminder> instruction frames, skill catalogs)
 // ---------------------------------------------------------------------------
 
 /**
- * One plugin-sourced `user/message` as a compact, collapsible disclosure row — the mobile
+ * One non-user-sourced `user/message` as a compact, collapsible disclosure row — the mobile
  * counterpart of the web client's context disclosure. The collapsed row names the snapshot's
- * sections so the reader sees what the model's context changed without expanding; the expanded
- * body prints each section's text as the model read it.
+ * sections (or the frame's first line when the producer declares none) so the reader sees what
+ * the model's context changed without expanding; the expanded body prints each section's text —
+ * or the model-facing text itself when the sections are absent — as the model read it.
  */
 @Composable
 private fun ContextDisclosureRow(node: ContextMessageNode) {
     val colors = DsTheme.colors
     var expanded by remember(node.seq) { mutableStateOf(false) }
-    val summary = node.sections.take(4).map { it.name }.joinToString(" · ")
+    val summary = node.sections.take(4).map { it.name }.joinToString(" · ").ifBlank {
+        node.text?.lineSequence()?.firstOrNull()?.trim()?.take(80)
+    }
     DisclosureRow(
         title = stringResource(R.string.chat_context_title),
-        summary = summary.ifBlank { node.form },
+        summary = summary ?: node.form,
         icon = FeatherIcons.Info,
         expanded = expanded,
         onToggle = { expanded = !expanded },

@@ -51,12 +51,15 @@ data class ContextSection(
 )
 
 /**
- * A `user/message` recorded by a plugin (e.g. the runtime-context snapshot from
- * `@deepseek-ai/dsh-system-prompt`) rather than typed by a person.
+ * A `user/message` whose durable `source.kind` is not `user` — context injected by the harness
+ * rather than typed by a person: the runtime-context snapshot (`plugin`), the AGENTS.md
+ * instruction frames (`agent-instructions`), the skill catalog (`skill-catalog`), and any
+ * plugin-merged kind.
  *
  * Rendered as a compact, collapsible context disclosure row — never as a user speech bubble.
- * `sections` is empty when the producer declared no usable section list (opaque form), in which
- * case the renderer falls back to the model-facing [text].
+ * `plugin` is null for non-`plugin` kinds; `sections` is empty when the producer declared no
+ * usable section list (the instructions and catalog forms do), in which case the renderer falls
+ * back to the model-facing [text].
  */
 data class ContextMessageNode(
     override val seq: Long,

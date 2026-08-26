@@ -124,10 +124,15 @@ private class FoldState(private val sessionId: String) {
                 val source = data.jsonObject["source"] as? JsonObject
                 val sourceKind = source?.get("kind")?.jsonPrimitive?.contentOrNull
                 val blocks = parseBlocks(data.jsonObject["content"])
-                if (sourceKind == "plugin") {
-                    // System-injected context (e.g. the runtime-context snapshot): the durable
-                    // source declares the producer and the snapshot sections; the transcript
-                    // renders it as a disclosure row, not a user bubble.
+                if (sourceKind != null && sourceKind != "user") {
+                    // System-injected context: the durable source declares a non-human producer.
+                    // This is the web client's own rule — any `user/message` whose `source.kind`
+                    // is not `user` is a context node, whatever the plugin is: the runtime-context
+                    // snapshot (`plugin`), the AGENTS.md instruction frames and the skill catalog
+                    // (`agent-instructions` / `skill-catalog`) are all `<system-reminder>`-framed
+                    // `user/message`s, not user speech. The transcript renders them as disclosure
+                    // rows, not user bubbles. A record with no source at all stays a user bubble —
+                    // leniency for a prompt typed by a person, the fold's standing contract.
                     nodes.add(
                         ContextMessageNode(
                             seq = event.seq,

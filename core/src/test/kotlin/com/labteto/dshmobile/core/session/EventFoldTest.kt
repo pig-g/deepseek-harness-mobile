@@ -7,6 +7,7 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -197,6 +198,83 @@ class EventFoldTest {
         val node = EventFold("s1").fold(events).nodes.single() as ContextMessageNode
         assertTrue(node.sections.isEmpty())
         assertEquals("You are a delegated subagent.", node.text)
+    }
+
+    /**
+     * An `agent-instructions`-sourced `user/message` (the `<system-reminder>` AGENTS.md frame)
+     * folds to a [ContextMessageNode] with the model-facing text, not a [UserMessageNode] bubble:
+     * the web client's rule is `source.kind != 'user'`, not `kind == 'plugin'`.
+     */
+    @Test
+    fun foldsInstructionFrameUserMessageIntoContextNode() {
+        val events = listOf(
+            event("user/message", 1, buildJsonObject {
+                put("id", "instr-1")
+                putJsonArray("content") {
+                    add(buildJsonObject {
+                        put("type", "text")
+                        put(
+                            "text",
+                            "<system-reminder>\nAdditional instructions from: AGENTS.md\n\nRules.\n</system-reminder>",
+                        )
+                    })
+                }
+                putJsonObject("source") {
+                    put("kind", "agent-instructions")
+                    put("form", "instructions")
+                }
+            }),
+        )
+        val node = EventFold("s1").fold(events).nodes.single() as ContextMessageNode
+        assertNull(node.plugin)
+        assertEquals("instructions", node.form)
+        assertTrue(node.sections.isEmpty())
+        assertTrue(node.text!!.startsWith("<system-reminder>"))
+        assertEquals("<system-reminder>", node.text!!.lineSequence().firstOrNull())
+    }
+
+    /**
+     * A `skill-catalog`-sourced `user/message` folds to a [ContextMessageNode] the same way.
+     */
+    @Test
+    fun foldsCatalogUserMessageIntoContextNode() {
+        val events = listOf(
+            event("user/message", 1, buildJsonObject {
+                put("id", "cat-1")
+                putJsonArray("content") {
+                    add(buildJsonObject {
+                        put("type", "text")
+                        put("text", "<system-reminder>\n<available_skills>\n- `a`: A\n</available_skills>\n</system-reminder>")
+                    })
+                }
+                putJsonObject("source") {
+                    put("kind", "skill-catalog")
+                    put("form", "catalog")
+                }
+            }),
+        )
+        val node = EventFold("s1").fold(events).nodes.single() as ContextMessageNode
+        assertEquals("catalog", node.form)
+        assertTrue(node.sections.isEmpty())
+    }
+
+    /**
+     * A `user/message` with no `source` field at all stays a [UserMessageNode]: a prompt typed by
+     * a person must never render as a context row, which is the fold's leniency contract.
+     */
+    @Test
+    fun foldsUserMessageWithoutSourceIntoUserNode() {
+        val events = listOf(
+            event("user/message", 1, buildJsonObject {
+                put("id", "m1")
+                putJsonArray("content") {
+                    add(buildJsonObject { put("type", "text"); put("text", "hi") })
+                }
+            }),
+        )
+        val node = EventFold("s1").fold(events).nodes.single() as UserMessageNode
+        assertEquals(null, node.sourceKind)
+        assertEquals("hi", node.previewText)
     }
 
     /**

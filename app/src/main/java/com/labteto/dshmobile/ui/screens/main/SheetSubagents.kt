@@ -208,21 +208,29 @@ private fun SubagentTranscriptRow(node: ChatNode) {
     when (node) {
         is UserMessageNode -> UserBubble(node.previewText)
         is ContextMessageNode -> {
-            // System-injected context (the child's delegation snapshot): a quiet disclosure row,
-            // not a user bubble.
+            // System-injected context (the child's delegation snapshot, its instruction frames,
+            // its skill catalog): a quiet disclosure row, not a user bubble.
             val sheetColors = DsTheme.colors
             var expanded by remember(node.seq) { mutableStateOf(false) }
             DisclosureRow(
                 title = stringResource(R.string.chat_context_title),
-                summary = node.sections.take(4).map { it.name }.joinToString(" · ").ifBlank { node.form },
+                summary = node.sections.take(4).map { it.name }.joinToString(" · ").ifBlank {
+                    node.text?.lineSequence()?.firstOrNull()?.trim()?.take(80)
+                } ?: node.form,
                 icon = FeatherIcons.Info,
                 expanded = expanded,
                 onToggle = { expanded = !expanded },
             ) {
                 Column(Modifier.padding(start = 28.dp, top = 2.dp)) {
-                    node.sections.forEach { section ->
-                        Text(section.name, style = DsType.caption11, color = sheetColors.labelCaption)
-                        Text(section.text, style = DsType.small13, color = sheetColors.labelSecondary)
+                    if (node.sections.isNotEmpty()) {
+                        node.sections.forEach { section ->
+                            Text(section.name, style = DsType.caption11, color = sheetColors.labelCaption)
+                            Text(section.text, style = DsType.small13, color = sheetColors.labelSecondary)
+                        }
+                    } else {
+                        node.text?.let {
+                            Text(it, style = DsType.caption11, color = sheetColors.labelSecondary)
+                        }
                     }
                 }
             }
