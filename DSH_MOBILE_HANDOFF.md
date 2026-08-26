@@ -265,3 +265,20 @@
 - **B3 (아키텍처 한계, 미해결 고지)**: 앱 프로세스가 종료/백그라운드에서 죽으면 push 채널이 없어 질문을 알 수 없음. 재접속 시 서버 재전송으로 복구. 근본 해결은 푸시(FCM 등) 필요. 참고: 승인 `_pendingApproval`에도 동일한 단일 슬롯 패턴이 대칭으로 존재(이번 범위 밖).
 - 검증: `:core:test` 그린(신규 `secondQuestionOfSameSessionKeepsADistinctDedupKey`, `questionRequestedFires` rpcId dedupKey assertion), `:app:assembleDebug` 그린, 사용자 실기기에서 질문이 정상 표시 확인(2026-08-24).
 - **신규 변경 파일(11.6+11.7)**: `core/.../session/Conversation.kt`, `core/.../session/EventFold.kt`, `core/.../notify/CompletionClassifier.kt`, `app/.../main/ChatNodeItem.kt`, `app/.../main/ChatNodeVisibility.kt`, `app/.../main/SheetSubagents.kt`, `app/.../notify/NotificationObserver.kt`, `app/.../data/SessionStore.kt`, `app/.../main/ChatScreen.kt`, 테스트 `core/src/test/.../session/EventFoldTest.kt`, `core/src/test/.../notify/CompletionClassifierTest.kt`.
+
+### 11.8 상단 빨간 "Reconnecting…" 배너가 한 번 뜨면 안 사라지는 문제 — **해결 (컴파일/빌드 검증, 실기기 검증 대기)**
+- 사용자 보고: 통신 장애 후 재연결되어도 상단 빨간 줄(Reconnecting…)이 계속 남음. "재연결되면 없어져야 하는것 아냐?"
+- 배너의 실제 출처: `ChatScreen.kt` `conversation?.gap == true` → `ConnectionBanner("Reconnecting…")`. `gap`은 `EventFold`가 이벤트 윈도우에 **seq 구멍**(`event.seq > lastSeq + 1`)이 있으면 세우는 플래그로, **어디서도 리셋되지 않음**.
+- 구멍 생성 경위: 다운링크가 죽었다 돌아와도 하네스 mux 스트림은 **누락 이벤트를 재전송하지 않음** (host `api-proxy.ts` `subscribeSession`: `session/subscribed { lastSeq }` 프레임만 보냄, 리플레이 없음). 따라서 재연결 후 첫 라이브 이벤트가 윈도우 꼬리보다 높은 seq로 도착 → fold가 구멍 감지 → 배너. 이 시점 표시는 정상.
+- 의도된 복구(재연결 후 history 재가져오기)가 안 되던 3가지:
+  1. `SessionStore.observeConnection`이 `RECONNECTING → CONNECTED` 전이만 감시하는데 **StateFlow 컨플레이션**으로 짧은 장애 시 CONNECTED만 보고 있으면 재베이스라인 자체가 안 돌림.
+  2. `triggerBaseline`의 `baselineMutex.tryLock()`이 이전 베이스라인이 느린 링크에서 진행 중이면 **정말로 스킵**됨.
+  3. 재가져오기가 돌아도 기존 병합이 **append-only**라, 구멍이 한 페이지보다 크면(긴 장애) 새 tail 페이지가 옛 꼬리 아래부터 시작 → 구멍 유지 → 배너 영구.
+- 수정 (`SessionStore.kt`, web 클라이언트 gap repair = `packages/client/runtime/.../sessions/session.ts` `acceptLiveEvent/repairGap`/`installWindow` 의미를 반영):
+  - `repairing` 플래그 + `stitchBuffer`(raw `HistoryEntry` list) + `fetchToken` 신규 상태. tail fetch(초기 open 포함) 진행 중 라이브 이벤트는 `stitchBuffer`에 버퍼링(append 아님) — commit에서 스티칭.
+  - **`session/subscribed` 프레임의 `lastSeq`를 실제 시그널로 사용**: `lastSeq > currentEvents 꼬리`이면 → `repairMissedEvents()` 트리거. (초기 open 중엔 윈도우가 비어 있어 이중 트리거 없음; fetch 진행 중이면 `repairing` 가드.)
+  - `repairMissedEvents()`: history tail 재가져와 **윈도우를 교체**(append가 아님 — 옛 이벤트는 `hasMore` "이전 로드" 영역으로), fetch 중 버퍼링된 라이브 이벤트 스티칭, fold 재계산 → 구멍 없으면 `gap=false` → **배너 소멸**. fetch 실패 시 그대로 유지(다음 스트림 재오픈/재연결 전이에 재시도).
+- 변경 파일: `app/.../data/SessionStore.kt` (state 필드, `session/subscribed` 핸들러, `handleSessionEvent` 버퍼링, `openSession` token/repairing/drain, 신규 `repairMissedEvents`/`drainStitchBufferLocked`, `appendCurrentEventLocked` 반환값 변경).
+- (보완) 라이브 이벤트가 윈도우 꼬리보다 높은 seq로 도착하는 순간에도 gap repair 트리거(web `acceptLiveEvent`와 동일) — `session/subscribed` 트리거가 실패/누락돼도 자가 복구. repair 성공 시 `_openFailed`도 해제.
+- 검증: `:app:assembleDebug` + `:app:testDebugUnitTest` 그린 (APK 2026-08-26 11:17, 21MB). **실기기 검증 대기**: 통신 단절(기기 잠금/데이터 끄기) 후 하네스에서 이벤트가 생기게 하고 복귀 → 배너가 잠깐 떴다가 history 재가져오기 완료 시 사라지는지 확인.
+- 한계: 구멍이 tail 페이지보다 크면 그 이하 메시지는 화면에서 빠지고 `hasMore`(Load older)로 복구 — web 클라이언트와 동일한 의미.

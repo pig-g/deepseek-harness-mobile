@@ -76,6 +76,7 @@ import java.time.Instant
 import java.util.TimeZone
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.jvm.Volatile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -325,6 +326,22 @@ class SessionStore @Inject constructor(
     private var currentQueue = emptyList<QueueItem>()
     private val toolViewsBySeq = HashMap<Long, ToolEventView>()
 
+    /**
+     * True between issuing a tail fetch (initial open or gap repair) and its commit. Live events
+     * arriving in that window buffer in [stitchBuffer] instead of appending: the fetch's commit is
+     * the single merge point, so nothing the clear drops is unrecoverable and nothing is
+     * double-applied. Mirrors the web client's `liveBuffer`/`stitching` pair.
+     */
+    @Volatile
+    private var repairing = false
+
+    /** Monotonic owner of the [repairing] window; only the newest fetch's commit releases it. */
+    @Volatile
+    private var fetchToken = 0
+
+    /** Raw events that arrived while [repairing]; stitched into the window at the fetch's commit. */
+    private val stitchBuffer = ArrayList<HistoryEntry>()
+
     private data class ApprovalRequest(
         val sessionId: String,
         val approvalId: String,
@@ -434,12 +451,22 @@ class SessionStore @Inject constructor(
             is MuxFrame.SessionEventFrame -> handleSessionEvent(mux.sessionId, mux.event, mux.view)
             is MuxFrame.SessionSubscribed -> {
                 val sid = mux.sessionId
-                Log.d("DSHConn", "session/subscribed: $sid (current=${currentSessionId.value})")
-                // Do NOT re-open here. createSession()/openSession() handle the initial open and
-                // triggerBaseline() handles the reconnect re-open. Calling openSession() from this
-                // handler double-opens the session: its currentEvents.clear() wipes events that
-                // arrived between the first open and this frame, and the history re-fetch may not
-                // include them yet — that is the "send does nothing, then suddenly works" bug.
+                Log.d("DSHConn", "session/subscribed: $sid lastSeq=${mux.lastSeq} (current=${currentSessionId.value})")
+                // This frame tells us where the log stands when the stream (re)opens; it replays
+                // nothing. If it stands past our window, events were committed while we were
+                // offline and the first live frame will land with a seq hole — the fold's `gap`
+                // flag (the "Reconnecting…" banner) only clears when the window is whole again, so
+                // refetch the tail now instead of waiting for a phase transition that StateFlow
+                // conflation can swallow. Do NOT call openSession() here: its clear would wipe
+                // events that arrived between the first open and this frame; repairMissedEvents()
+                // replaces the window through the same commit point instead.
+                // Skipped while a fetch already owns the window (repairing): its commit stitches
+                // in everything, including what this frame reports.
+                val refetch = synchronized(lock) {
+                    sid == currentId && !repairing && currentEvents.isNotEmpty() &&
+                        mux.lastSeq.toLong() > currentEvents.last().seq
+                }
+                if (refetch) scope.launch { repairMissedEvents(sid) }
             }
             is MuxFrame.ApprovalRequested -> handleApprovalRequested(frame.rpcId, mux)
             is MuxFrame.ApprovalResolved -> handleApprovalResolved(mux)
@@ -502,10 +529,27 @@ class SessionStore @Inject constructor(
         }
         synchronized(lock) {
             if (sessionId == currentId) {
-                appendCurrentEventLocked(envelope)
-                if (view != null) {
-                    toolViewsBySeq[event.seq.toLong()] = view
-                    _toolViews.value = toolViewsBySeq.toMap()
+                if (repairing) {
+                    // A tail fetch (initial open or gap repair) owns the window merge; buffer the
+                    // raw event so its commit stitches it in rather than losing it to a clear.
+                    stitchBuffer.add(HistoryEntry(event, view))
+                } else {
+                    val seq = event.seq.toLong()
+                    val tail = currentEvents.lastOrNull()?.seq ?: -1L
+                    appendCurrentEventLocked(envelope)
+                    if (view != null) {
+                        toolViewsBySeq[seq] = view
+                        _toolViews.value = toolViewsBySeq.toMap()
+                    }
+                    rebuildCurrentLocked()
+                    if (seq > tail + 1) {
+                        // A live frame landing past the window's tail: events were committed
+                        // while the downlink was down. The fold just flagged the hole (the
+                        // "Reconnecting…" banner); refetch the tail so the window is whole
+                        // again. While the repair owns the window the rest of the burst
+                        // buffers instead of re-triggering.
+                        scope.launch { repairMissedEvents(sessionId) }
+                    }
                 }
             }
         }
@@ -713,7 +757,8 @@ class SessionStore @Inject constructor(
     }
 
     // ------------------------------------------------------------------ open-session fold
-    private fun appendCurrentEventLocked(envelope: SessionEventEnvelope) {
+    /** Apply one live event to the window; the caller rebuilds the fold when this returns true. */
+    private fun appendCurrentEventLocked(envelope: SessionEventEnvelope): Boolean {
         val idx = currentEvents.indexOfFirst { it.seq == envelope.seq }
         if (idx >= 0) {
             currentEvents[idx] = envelope
@@ -721,6 +766,25 @@ class SessionStore @Inject constructor(
             currentEvents.add(envelope)
             currentEvents.sortBy { it.seq }
         }
+        return true
+    }
+
+    /**
+     * Stitch the events buffered during a tail fetch into the just-committed window, dropping
+     * what the refetched page already carries. Runs under `lock` at the fetch's commit, so a live
+     * event either lands in [stitchBuffer] (before) or appends directly (after) — never both.
+     */
+    private fun drainStitchBufferLocked() {
+        if (stitchBuffer.isEmpty()) return
+        for (entry in stitchBuffer) {
+            val seq = entry.event.seq.toLong()
+            val tail = currentEvents.lastOrNull()?.seq ?: -1L
+            if (seq <= tail) continue
+            appendCurrentEventLocked(sessionEventToEnvelope(entry.event))
+            entry.view?.let { toolViewsBySeq[seq] = it }
+        }
+        stitchBuffer.clear()
+        _toolViews.value = toolViewsBySeq.toMap()
         rebuildCurrentLocked()
     }
 
@@ -849,7 +913,7 @@ class SessionStore @Inject constructor(
         val api = apiOrNull() ?: return
         _openFailed.value = false
         _loadOlderFailed.value = false
-        synchronized(lock) {
+        val token = synchronized(lock) {
             val same = currentId == sessionId
             currentId = sessionId
             _currentSessionId.value = sessionId
@@ -871,46 +935,60 @@ class SessionStore @Inject constructor(
                 _commands.value = emptyList()
                 _pendingPermission.value = null
             }
+            ++fetchToken
         }
-        when (val r = api.sessionHistory(SessionHistoryRequest(sessionId, null, HISTORY_PAGE_SIZE))) {
-            is RpcResult.Ok -> {
-                clearConnectionError()
-                val page = historyTail(r.value.events)
-                val overDelivered = r.value.events.size > page.size
-                val envelopes = ArrayList<SessionEventEnvelope>(page.size)
-                val views = HashMap<Long, ToolEventView>()
-                for (entry in page) {
-                    envelopes.add(sessionEventToEnvelope(entry.event))
-                    entry.view?.let { views[entry.event.seq.toLong()] = it }
-                }
-                synchronized(lock) {
-                    if (currentId != sessionId) return@synchronized
-                    // Merge, not replace: events that arrived on the mux WS during the history
-                    // fetch are already in currentEvents (appended by handleSessionEvent). Clearing
-                    // here wipes the user's send and the model's answer — the "send does nothing,
-                    // then suddenly works" bug. Keep live events; add history events not already
-                    // present (same merge pattern loadOlder uses).
-                    val existingSeqs = currentEvents.mapTo(HashSet()) { it.seq }
-                    val fresh = envelopes.filter { it.seq !in existingSeqs }
-                    if (fresh.isNotEmpty()) {
-                        currentEvents.addAll(fresh)
-                        currentEvents.sortBy { it.seq }
+        repairing = true
+        try {
+            when (val r = api.sessionHistory(SessionHistoryRequest(sessionId, null, HISTORY_PAGE_SIZE))) {
+                is RpcResult.Ok -> {
+                    clearConnectionError()
+                    val page = historyTail(r.value.events)
+                    val overDelivered = r.value.events.size > page.size
+                    val envelopes = ArrayList<SessionEventEnvelope>(page.size)
+                    val views = HashMap<Long, ToolEventView>()
+                    for (entry in page) {
+                        envelopes.add(sessionEventToEnvelope(entry.event))
+                        entry.view?.let { views[entry.event.seq.toLong()] = it }
                     }
-                    currentHasMore = r.value.hasMore || overDelivered
-                    toolViewsBySeq.putAll(views)
-                    _toolViews.value = toolViewsBySeq.toMap()
-                    r.value.projections?.let { block ->
-                        block.values.forEach { (key, value) ->
-                            currentProjections[key] = ProjectionValue(block.asOfSeq, value)
+                    synchronized(lock) {
+                        // A newer openSession took the stage while the fetch was in flight: it
+                        // owns the commit, so this one only yields (its finally releases nothing —
+                        // the newer fetch's token still owns the repairing window).
+                        if (currentId != sessionId || fetchToken != token) return@synchronized
+                        // Live events that arrived on the mux WS during the fetch are in
+                        // stitchBuffer (handleSessionEvent detours while repairing); the commit
+                        // below stitches them in, so the clear above wipes nothing it cannot
+                        // recover — the "send does nothing, then suddenly works" guard.
+                        val existingSeqs = currentEvents.mapTo(HashSet()) { it.seq }
+                        val fresh = envelopes.filter { it.seq !in existingSeqs }
+                        if (fresh.isNotEmpty()) {
+                            currentEvents.addAll(fresh)
+                            currentEvents.sortBy { it.seq }
                         }
+                        currentHasMore = r.value.hasMore || overDelivered
+                        toolViewsBySeq.putAll(views)
+                        _toolViews.value = toolViewsBySeq.toMap()
+                        r.value.projections?.let { block ->
+                            block.values.forEach { (key, value) ->
+                                currentProjections[key] = ProjectionValue(block.asOfSeq, value)
+                            }
+                        }
+                        rebuildCurrentLocked()
+                        _openFailed.value = false
+                        drainStitchBufferLocked()
+                        repairing = false
                     }
-                    rebuildCurrentLocked()
-                    _openFailed.value = false
+                }
+                is RpcResult.Err -> {
+                    setConnectionError(r.error.message)
+                    _openFailed.value = true
                 }
             }
-            is RpcResult.Err -> {
-                setConnectionError(r.error.message)
-                _openFailed.value = true
+        } finally {
+            // The Ok commit already released it; the Err and throw paths release here. A
+            // superseded token leaves the window owned by the newer fetch.
+            synchronized(lock) {
+                if (fetchToken == token) repairing = false
             }
         }
         // The transcript is already READY (conversation set above). These catalog refreshes are
@@ -932,6 +1010,73 @@ class SessionStore @Inject constructor(
         _currentConversation.value = null
         _openFailed.value = false
         openSession(sid)
+    }
+
+    /**
+     * Refetch the session's history tail and re-install it as the open window — the gap repair.
+     *
+     * The mux stream replays nothing on (re)open: the host's `session/subscribed` frame only
+     * reports where the log stands. Events committed while the downlink was down therefore never
+     * arrive on their own; the first live frame after reconnect lands past the window's tail,
+     * the fold flags the hole (`gap` → the "Reconnecting…" banner), and it stays up until the
+     * window is whole again. A plain append-merge cannot repair a hole wider than one page, so
+     * the fresh page replaces the window: it is one contiguous range, what falls below it is the
+     * `hasMore` "load older" territory, and the live events buffered during the fetch stitch on
+     * top. Mirrors the web client's gap repair.
+     */
+    private suspend fun repairMissedEvents(sessionId: String) {
+        val api = apiOrNull() ?: return
+        val token = synchronized(lock) {
+            if (currentId != sessionId) return
+            ++fetchToken
+        }
+        Log.d("DSHConn", "gap repair: $sessionId (token=$token)")
+        repairing = true
+        try {
+            when (val r = api.sessionHistory(SessionHistoryRequest(sessionId, null, HISTORY_PAGE_SIZE))) {
+                is RpcResult.Ok -> {
+                    clearConnectionError()
+                    val page = historyTail(r.value.events)
+                    val overDelivered = r.value.events.size > page.size
+                    synchronized(lock) {
+                        if (currentId != sessionId || fetchToken != token) return@synchronized
+                        // Replace, not append: the page starts below the old window's tail, so
+                        // keeping the old events would preserve exactly the hole being repaired.
+                        currentEvents.clear()
+                        for (entry in page) {
+                            currentEvents.add(sessionEventToEnvelope(entry.event))
+                            entry.view?.let { toolViewsBySeq[entry.event.seq.toLong()] = it }
+                        }
+                        currentEvents.sortBy { it.seq }
+                        currentHasMore = r.value.hasMore || overDelivered
+                        _toolViews.value = toolViewsBySeq.toMap()
+                        // Higher seq wins: projection frames merged live during the fetch are at
+                        // or above the page and must not be regressed by it.
+                        r.value.projections?.let { block ->
+                            block.values.forEach { (key, value) ->
+                                val existing = currentProjections[key]
+                                if (existing == null || block.asOfSeq >= existing.seq) {
+                                    currentProjections[key] = ProjectionValue(block.asOfSeq, value)
+                                }
+                            }
+                        }
+                        rebuildCurrentLocked()
+                        _openFailed.value = false
+                        drainStitchBufferLocked()
+                        repairing = false
+                    }
+                }
+                is RpcResult.Err -> {
+                    // Leave the window (and its banner) as is; the next stream reopen or
+                    // phase-transition re-baseline re-triggers the repair.
+                    log("gap repair failed: ${r.error.message}")
+                }
+            }
+        } finally {
+            synchronized(lock) {
+                if (fetchToken == token) repairing = false
+            }
+        }
     }
 
     /**
