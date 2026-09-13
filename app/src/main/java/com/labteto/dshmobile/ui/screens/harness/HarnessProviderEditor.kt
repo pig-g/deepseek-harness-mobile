@@ -1,5 +1,6 @@
 package com.labteto.dshmobile.ui.screens.harness
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,7 +10,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
@@ -99,10 +99,77 @@ fun ProviderEditorSheet(
     val discoverable = layout != HarnessSettingsViewModel.Layout.PiAi ||
         api in listOf("openai-completions", "openai-responses")
 
+    // Computed here rather than inside the content lambda: the validation line and the Save
+    // button both live in the pinned footer, which is a sibling of the scrolling body.
+    val keyFailure = apiKeyFailure(keyDraft)
+    val modelFailure = validateModelRows(modelRows)
+    val apiMissing = layout == HarnessSettingsViewModel.Layout.PiAi && api.isBlank()
+
     DsBottomSheet(
         title = entry.displayName,
         subtitle = entry.provider,
         onDismiss = { if (!busy) onDismiss() },
+        footer = {
+            val failureText = failure
+            if (failureText != null) {
+                Text(failureText, style = DsType.small13, color = colors.error)
+            } else if (keyFailure != null) {
+                Text(
+                    stringResource(
+                        if (keyFailure == KeyFailure.Blank) R.string.hset_val_api_key_blank
+                        else R.string.hset_val_api_key_format,
+                    ),
+                    style = DsType.small13,
+                    color = colors.error,
+                )
+            } else if (modelFailure != null) {
+                ModelFailureLine(modelFailure)
+            }
+
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(DsSpacing.small),
+            ) {
+                DsButton(
+                    text = stringResource(R.string.common_cancel),
+                    onClick = onDismiss,
+                    variant = DsButtonVariant.Ghost,
+                )
+                Spacer(Modifier.weight(1f))
+                DsButton(
+                    text = stringResource(R.string.common_save),
+                    enabled = !busy && layout != HarnessSettingsViewModel.Layout.Unknown
+                        && keyFailure == null && modelFailure == null && !apiMissing,
+                    onClick = {
+                        busy = true
+                        failure = null
+                        scope.launch {
+                            val draft = LinkedHashMap<String, JsonElement?>(passThrough)
+                            applyManagedFields(
+                                draft = draft,
+                                layout = layout,
+                                showDisplayName = showDisplayName,
+                                api = api,
+                                displayName = displayName,
+                                baseURL = baseURL,
+                                modelRows = modelRows,
+                            )
+                            val out = viewModel.saveProvider(
+                                layout = layout,
+                                settingsNs = entry.settingsNs,
+                                settingsPath = entry.settingsPath,
+                                provider = entry.provider,
+                                before = before,
+                                draft = draft,
+                                key = keyDraft,
+                            )
+                            busy = false
+                            if (out.ok) onDismiss() else failure = out.message ?: out.code ?: "error"
+                        }
+                    },
+                )
+            }
+        },
     ) {
         when (layout) {
             HarnessSettingsViewModel.Layout.Unknown -> {
@@ -217,70 +284,6 @@ fun ProviderEditorSheet(
                     AdvancedFields(passThrough)
                 }
             }
-        }
-
-        // ------------------------------------------------ footer
-        val keyFailure = apiKeyFailure(keyDraft)
-        val modelFailure = validateModelRows(modelRows)
-        val apiMissing = layout == HarnessSettingsViewModel.Layout.PiAi && api.isBlank()
-        val failureText = failure
-        if (failureText != null) {
-            Text(failureText, style = DsType.small13, color = colors.error)
-        } else if (keyFailure != null) {
-            Text(
-                stringResource(
-                    if (keyFailure == KeyFailure.Blank) R.string.hset_val_api_key_blank
-                    else R.string.hset_val_api_key_format,
-                ),
-                style = DsType.small13,
-                color = colors.error,
-            )
-        } else if (modelFailure != null) {
-            ModelFailureLine(modelFailure)
-        }
-
-        Row(
-            Modifier.fillMaxWidth().padding(top = DsSpacing.small),
-            horizontalArrangement = Arrangement.spacedBy(DsSpacing.small),
-        ) {
-            DsButton(
-                text = stringResource(R.string.common_cancel),
-                onClick = onDismiss,
-                variant = DsButtonVariant.Ghost,
-            )
-            Spacer(Modifier.weight(1f))
-            DsButton(
-                text = stringResource(R.string.common_save),
-                enabled = !busy && layout != HarnessSettingsViewModel.Layout.Unknown
-                    && keyFailure == null && modelFailure == null && !apiMissing,
-                onClick = {
-                    busy = true
-                    failure = null
-                    scope.launch {
-                        val draft = LinkedHashMap<String, JsonElement?>(passThrough)
-                        applyManagedFields(
-                            draft = draft,
-                            layout = layout,
-                            showDisplayName = showDisplayName,
-                            api = api,
-                            displayName = displayName,
-                            baseURL = baseURL,
-                            modelRows = modelRows,
-                        )
-                        val out = viewModel.saveProvider(
-                            layout = layout,
-                            settingsNs = entry.settingsNs,
-                            settingsPath = entry.settingsPath,
-                            provider = entry.provider,
-                            before = before,
-                            draft = draft,
-                            key = keyDraft,
-                        )
-                        busy = false
-                        if (out.ok) onDismiss() else failure = out.message ?: out.code ?: "error"
-                    }
-                },
-            )
         }
     }
 
@@ -529,6 +532,64 @@ fun DiscoverModelsSheet(
         title = stringResource(R.string.hset_models_discover_title),
         subtitle = provider,
         onDismiss = { if (!busy) onDismiss() },
+        // Fetch/Apply stay pinned: the discovered list above can grow past the viewport.
+        footer = {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(DsSpacing.small),
+            ) {
+                DsButton(
+                    text = stringResource(R.string.hset_models_discover_fetch),
+                    enabled = !busy && baseURL.isNotBlank(),
+                    onClick = {
+                        busy = true
+                        failure = null
+                        scope.launch {
+                            val discovery = viewModel.discover(
+                                LlmDiscoverModelsRequest(
+                                    settingsNs = settingsNs,
+                                    provider = provider,
+                                    baseURL = baseURL.trim().takeIf { it.isNotEmpty() },
+                                    api = api.trim().takeIf { it.isNotEmpty() },
+                                    apiKey = key.trim().takeIf { it.isNotEmpty() },
+                                ),
+                            )
+                            busy = false
+                            if (discovery.failure != null) {
+                                failure = discovery.failure
+                            } else {
+                                results = discovery.models
+                                checked = discovery.models.indices.toSet()
+                            }
+                        }
+                    },
+                    variant = DsButtonVariant.Info,
+                    size = DsButtonSize.Small,
+                )
+                Spacer(Modifier.weight(1f))
+                DsButton(
+                    text = stringResource(R.string.hset_models_discover_apply, checked.size),
+                    enabled = (results?.size ?: 0) > 0 && checked.isNotEmpty(),
+                    onClick = {
+                        val found = results.orEmpty()
+                        onApply(
+                            found
+                                .filterIndexed { index, _ -> index in checked }
+                                .map { model ->
+                                    ModelRowDraft(
+                                        id = model.id,
+                                        name = model.name.orEmpty(),
+                                        contextWindow = model.contextWindow?.toString().orEmpty(),
+                                        maxTokens = model.maxTokens?.toString().orEmpty(),
+                                    )
+                                },
+                        )
+                    },
+                    variant = DsButtonVariant.Primary,
+                    size = DsButtonSize.Small,
+                )
+            }
+        },
     ) {
         Text(
             stringResource(R.string.hset_models_discover_hint),
@@ -572,9 +633,7 @@ fun DiscoverModelsSheet(
                 )
             } else {
                 Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
+                    Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(DsSpacing.xsmall),
                 ) {
                     found.forEachIndexed { index, model ->
@@ -611,62 +670,6 @@ fun DiscoverModelsSheet(
                     }
                 }
             }
-        }
-
-        Row(
-            Modifier.fillMaxWidth().padding(top = DsSpacing.small),
-            horizontalArrangement = Arrangement.spacedBy(DsSpacing.small),
-        ) {
-            DsButton(
-                text = stringResource(R.string.hset_models_discover_fetch),
-                enabled = !busy && baseURL.isNotBlank(),
-                onClick = {
-                    busy = true
-                    failure = null
-                    scope.launch {
-                        val discovery = viewModel.discover(
-                            LlmDiscoverModelsRequest(
-                                settingsNs = settingsNs,
-                                provider = provider,
-                                baseURL = baseURL.trim().takeIf { it.isNotEmpty() },
-                                api = api.trim().takeIf { it.isNotEmpty() },
-                                apiKey = key.trim().takeIf { it.isNotEmpty() },
-                            ),
-                        )
-                        busy = false
-                        if (discovery.failure != null) {
-                            failure = discovery.failure
-                        } else {
-                            results = discovery.models
-                            checked = discovery.models.indices.toSet()
-                        }
-                    }
-                },
-                variant = DsButtonVariant.Info,
-                size = DsButtonSize.Small,
-            )
-            Spacer(Modifier.weight(1f))
-            DsButton(
-                text = stringResource(R.string.hset_models_discover_apply, checked.size),
-                enabled = (results?.size ?: 0) > 0 && checked.isNotEmpty(),
-                onClick = {
-                    val found = results.orEmpty()
-                    onApply(
-                        found
-                            .filterIndexed { index, _ -> index in checked }
-                            .map { model ->
-                                ModelRowDraft(
-                                    id = model.id,
-                                    name = model.name.orEmpty(),
-                                    contextWindow = model.contextWindow?.toString().orEmpty(),
-                                    maxTokens = model.maxTokens?.toString().orEmpty(),
-                                )
-                            },
-                    )
-                },
-                variant = DsButtonVariant.Primary,
-                size = DsButtonSize.Small,
-            )
         }
     }
 }
@@ -707,6 +710,44 @@ fun CustomProviderSheet(
     DsBottomSheet(
         title = stringResource(R.string.hset_models_add_custom),
         onDismiss = { if (!busy) onDismiss() },
+        footer = {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(DsSpacing.small),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                DsButton(
+                    text = stringResource(R.string.common_cancel),
+                    onClick = onDismiss,
+                    variant = DsButtonVariant.Ghost,
+                )
+                Spacer(Modifier.weight(1f))
+                DsButton(
+                    text = stringResource(R.string.common_save),
+                    enabled = canSave,
+                    onClick = {
+                        busy = true
+                        scope.launch {
+                            val out = viewModel.addCustomProvider(
+                                settingsNs = settingsNs,
+                                route = route.trim(),
+                                displayName = displayName,
+                                api = api,
+                                baseURL = baseURL,
+                                rows = modelRows,
+                                key = keyDraft,
+                            )
+                            busy = false
+                            if (out.ok) onDismiss() else {
+                                // The write failed: surface the harness's reason through the funnel
+                                // and keep the sheet open so the user can correct and retry.
+                                ToastFunnel.report(out, R.string.hset_saved)
+                            }
+                        }
+                    },
+                )
+            }
+        },
     ) {
         HarnessField(
             label = stringResource(R.string.hset_models_custom_route),
@@ -731,8 +772,10 @@ fun CustomProviderSheet(
                 color = colors.labelSecondary,
             )
             Spacer(Modifier.height(DsSpacing.xsmall))
+            // Horizontally scrollable: the protocol names are long ("openai-completions") and a
+            // plain Row would clip the later chips off the right edge on a phone.
             Row(
-                Modifier.fillMaxWidth(),
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(DsSpacing.xsmall),
             ) {
                 PIAI_PROTOCOLS.forEach { choice ->
@@ -784,41 +827,5 @@ fun CustomProviderSheet(
             icon = Icons.Filled.Add,
             modifier = Modifier.fillMaxWidth(),
         )
-
-        Row(
-            Modifier.fillMaxWidth().padding(top = DsSpacing.small),
-            horizontalArrangement = Arrangement.spacedBy(DsSpacing.small),
-        ) {
-            DsButton(
-                text = stringResource(R.string.common_cancel),
-                onClick = onDismiss,
-                variant = DsButtonVariant.Ghost,
-            )
-            Spacer(Modifier.weight(1f))
-            DsButton(
-                text = stringResource(R.string.common_save),
-                enabled = canSave,
-                onClick = {
-                    busy = true
-                    scope.launch {
-                        val out = viewModel.addCustomProvider(
-                            settingsNs = settingsNs,
-                            route = route.trim(),
-                            displayName = displayName,
-                            api = api,
-                            baseURL = baseURL,
-                            rows = modelRows,
-                            key = keyDraft,
-                        )
-                        busy = false
-                        if (out.ok) onDismiss() else {
-                            // The write failed: surface the harness's reason through the funnel
-                            // and keep the sheet open so the user can correct and retry.
-                            ToastFunnel.report(out, R.string.hset_saved)
-                        }
-                    }
-                },
-            )
-        }
     }
 }

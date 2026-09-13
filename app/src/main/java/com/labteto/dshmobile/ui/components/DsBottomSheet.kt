@@ -7,11 +7,17 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -26,11 +32,24 @@ import com.labteto.dshmobile.ui.theme.DsTheme
 import com.labteto.dshmobile.ui.theme.DsType
 
 /**
+ * Ceiling on a sheet's height as a fraction of the viewport. Leaves a scrim gap above the sheet
+ * (so the dismiss-by-tap-outside affordance stays obvious) and keeps the title row clear of the
+ * status bar.
+ */
+private const val MAX_HEIGHT_FRACTION = 0.92f
+
+/**
  * The app's sheet surface, themed to the harness tokens.
  *
  * Sheets rather than dialogs for pickers: they arrive from the thumb's end of the screen, size
  * themselves to their content, and let a long list scroll without fighting a fixed-height plate.
  * [trailing] holds an optional action aligned with the title.
+ *
+ * The body scrolls and is capped at [MAX_HEIGHT_FRACTION] of the viewport, so a form taller than
+ * the screen no longer clips its own tail. Pass the primary action through [footer] rather than
+ * ending the content with it: the footer is pinned below the scroll region and stays reachable
+ * however long the form grows (an "Add custom provider" sheet with several model rows would
+ * otherwise push its Save button off-screen).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,6 +59,7 @@ fun DsBottomSheet(
     modifier: Modifier = Modifier,
     subtitle: String? = null,
     trailing: (@Composable () -> Unit)? = null,
+    footer: (@Composable ColumnScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = DsTheme.colors
@@ -52,11 +72,14 @@ fun DsBottomSheet(
         containerColor = colors.bgLayer2,
         scrimColor = colors.overlayMask,
         dragHandle = null,
-        contentWindowInsets = { WindowInsets.navigationBars },
+        // Navigation bar plus the keyboard: these sheets are text-heavy, so a focused field at the
+        // bottom of the scroll region must not end up behind the IME.
+        contentWindowInsets = { WindowInsets.navigationBars.union(WindowInsets.ime) },
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .fillMaxHeight(MAX_HEIGHT_FRACTION)
                 .padding(horizontal = DsSpacing.large, vertical = DsSpacing.comfortable),
             verticalArrangement = Arrangement.spacedBy(DsSpacing.small),
         ) {
@@ -85,7 +108,27 @@ fun DsBottomSheet(
                     trailing?.invoke()
                 }
             }
-            content()
+            // `fill = false` keeps a short sheet sized to its content (no dead space below the last
+            // row) while a tall one takes the remaining height and scrolls inside it.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f, fill = false)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(DsSpacing.small),
+            ) {
+                content()
+            }
+
+            if (footer != null) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(DsSpacing.small),
+                ) {
+                    HorizontalDivider(color = colors.borderL2)
+                    footer()
+                }
+            }
             Spacer(Modifier.height(DsSpacing.small))
         }
     }

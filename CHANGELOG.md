@@ -29,6 +29,18 @@ All notable changes to DSH Mobile are documented here. Format based on
 
 ### Fixed
 
+- **Sheets taller than the screen clipped their own action row** — `DsBottomSheet`
+  laid its content out in an unbounded column with no scroll container, so a form
+  that outgrew the viewport pushed its footer off-screen with no way to reach it.
+  "Add custom provider" was the worst case (each added model row grows it by two
+  field-rows), leaving the Create/Save button untappable. The sheet body now
+  scrolls inside a viewport cap, and a new `footer` slot is pinned below the
+  scroll region so the primary action stays reachable however long the form gets.
+  The three harness sheets (provider editor, custom provider, model discovery)
+  pass their action rows through it; the protocol chip row scrolls horizontally
+  so the long `openai-completions` / `anthropic-messages` labels no longer run
+  off the edge; and the sheet now consumes the IME inset so a focused field at
+  the bottom of a form is not hidden behind the keyboard.
 - **Crash during "Reconnecting…"** — the gap-repair work (the fix for the
   sticky Reconnecting banner) made the store re-encode every live
   `session/event` through the strict typed serializers on the hot path,
