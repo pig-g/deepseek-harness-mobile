@@ -257,7 +257,9 @@ class ConnectViewModel @Inject constructor(
             return
         }
         val authority = "$trimmed:$portInt"
-        val isLoopback = trimmed == LOOPBACK || trimmed == "localhost"
+        // The emulator's host alias (10.0.2.2 == host 127.0.0.1) is reachable from the guest
+        // even though it is not on the guest's /24, so it must skip the subnet pre-check.
+        val isLoopback = trimmed == LOOPBACK || trimmed == "localhost" || trimmed == "10.0.2.2"
 
         localStage = ConnectStage.Validating
         _state.update { it.copy(stage = ConnectStage.Validating, failure = null, attempted = authority) }

@@ -7,6 +7,8 @@
 
 사용자가 보고한 핵심 문제: **새/기존 세션을 열었을 때 "초기화(initializing)" 또는 "첫 전송이 안 되는" 상태가 비정상적으로 오래 지속됐다가 갑자기 정상화**된다. 렌더링 버그는 이미 해결됐고, **근본 원인을 확정하고 수정 완료**했다. 핵심 원인은 **Compose 상태 라이프사이클 문제**: 세션 전환 시 `Composer`(TextField + Send 버튼)가 재구성(recompose)만 되고 재생성(recreate)되지 않아 TextField의 내부 상태(IME 연결, 커서)가 stale → Send 버튼이 반응하지 않음. 화면 회전 시 Activity 재생성으로 Compose 트리가 새로 만들어져 즉시 해결되는 것이 사용자의 단서. **`key(currentSessionId)`로 Composer를 강제 재생성**하여 해결. **사용자 실기기 검증 완료.**
 
+**최신 작업 (2026-08-26)**: 세션이 running 중 페이지닝→전환→복귀 시의 **세션 히스토리 레이스 4종**을 수정 — (C1) 읽기 위치 기억(복귀 시 tail이 아닌 떠나던 위치), (C2) 범위 인지 stitch drain, (C3) repair 한 번만, (C4) 설명 가능한 gap 억제(가짜 "Reconnecting…" 배너 제거), (C5) 500 이벤트 윈도우 상한(메모리/재폴드 상한). 유닛 검증 완료, **실기기/에뮬레이터 V1–V5 검증 대기**. 상세: **섹션 11.9**.
+
 ---
 
 ## 2. 프로젝트 / 환경 정보
@@ -148,6 +150,7 @@
 4. **[완료] 큐-앤-오토-플러시**: RECONNECTING 중 전송 시 메시지 큐잉 후 재접속 시 자동 전송.
 5. **[완료] 진단 로그**: `DSHSend` (send 게이트별), `DSHConn` (phase 변경, generation 실패, session/subscribed).
 6. **[완료 — 사용자 실기기 검증됨] UX 개선 — 섹션 11.6/11.7 참조**: (a) "runtime-context 스냅샷" user/message를 거대 버블 대신 **접을 수 있는 "Context" disclosure 행**으로 렌더(플러그인 source `@deepseek-ai/dsh-system-prompt`, `form:"snapshot"` 판별, 섹션 11.6); (b) `ask_user_question` 모바일 오작동 2건 수정 — 질문 알림 dedup(rpcId 기반) + pending 질문 세션별 Map화(섹션 11.7).
+7. **[완료 — 유닛 검증; 실기기/에뮬레이터 V1–V5 대기] 세션 히스토리 레이스 4종 수정 — 섹션 11.9 참조**: running 세션에서 페이지닝→전환→복귀 시 (C1) 읽기 위치 기억, (C2) 범위 인지 stitch drain, (C3) repair 한 번만, (C4) 설명 가능한 gap 억제(가짜 "Reconnecting…" 배너 제거), (C5) 500 이벤트 윈도우 상한. `SessionHistoryRaceTest`(T1/T4) 유닛 그린. **다음 세션**: 에뮬레이터/실기기에서 V1–V5 확인(§11.9 "검증" 항목) — 특히 V1(복귀 시 tail이 아닌 기억된 위치 착지)과 V5(`dumpsys meminfo` PSS 평탄).
 
 ---
 
@@ -200,7 +203,16 @@
 - `app/.../ui/screens/main/ChatTranscript.kt` (openFailed → TranscriptRefresh)
 - `app/src/main/res/values/strings.xml` (chat_open_failed, chat_open_retry)
 
-**현재 상태**: 결정적 근본 원인(Compose 상태 라이프사이클 — 세션 전환 시 TextField/IME stale) 확정·수정·**사용자 실기기 검증 완료**. `key(currentSessionId)`로 Composer 강제 재생성이 핵심 픽스. 보조로 openSession 이벤트 유실 레이스(seq 머지), 다운링크 튜닝(pingInterval/handshake timeout), 큐-앤-오토-플러시, 진단 로그 추가. 앱 빌드/실행 정상, 콜드 스타트 크래시 없음. **렌더링·무한 초기화·새 세션 Send 무반응·이벤트 유실·침묵 전송 모두 해결됨.**
+**세션 히스토리 레이스 4종 (섹션 11.9)**:
+- `app/.../data/SessionStore.kt` — C1 `oldestLoadedSeq` 커서(openSession/repair/loadOlder 커밋+Err 폐기), C2 범위 인지 `drainStitchBufferLocked`, C3 `repairInFlight`, C4 `explainableGapLocked`+repair 트리거 커버 판정, C5 `trimWindowLocked`/`MAX_WINDOW_EVENTS=500`; `repairMissedEvents`를 `internal`로
+- `core/.../wire/DshApiClient.kt` — `open class` + `sessionHistory` open (테스트 서브클래스용)
+- `app/.../connection/ConnectionManager.kt` — `open class` + `_state`/`api` protected
+- `app/.../connection/HostsStore.kt` — `open class` + `lastSessionId` open
+- `app/build.gradle.kts` — `testOptions { unitTests { isReturnDefaultValues = true } }` (JVM 유닛 테스트에서 `android.util.Log` no-mock)
+- 신규 `app/src/test/.../data/SessionHistoryRaceTest.kt` (T1 커서 전달, T4 open 진행 중 버스트 스티칭)
+- `CHANGELOG.md` — [Unreleased] Fixed×2(가짜 Reconnecting 배너, 복귀 시 전체 히스토리 재빌드) + Improved×1(500 이벤트 윈도우 상한)
+
+**현재 상태**: 결정적 근본 원인(Compose 상태 라이프사이클 — 세션 전환 시 TextField/IME stale) 확정·수정·**사용자 실기기 검증 완료**. `key(currentSessionId)`로 Composer 강제 재생성이 핵심 픽스. 보조로 openSession 이벤트 유실 레이스(seq 머지), 다운링크 튜닝(pingInterval/handshake timeout), 큐-앤-오토-플러시, 진단 로그 추가. **최신: 세션 히스토리 레이스 4종(C1–C5) 수정 — 유닛 검증 완료, 실기기/에뮬레이터 V1–V5 대기(§11.9)**. 앱 빌드/실행 정상, 콜드 스타트 크래시 없음. **렌더링·무한 초기화·새 세션 Send 무반응·이벤트 유실·침묵 전송·가짜 Reconnecting 배너·복귀 시 전체 재빌드·무한 메모리 모두 해결됨.**
 
 ---
 
@@ -282,3 +294,35 @@
 - (보완) 라이브 이벤트가 윈도우 꼬리보다 높은 seq로 도착하는 순간에도 gap repair 트리거(web `acceptLiveEvent`와 동일) — `session/subscribed` 트리거가 실패/누락돼도 자가 복구. repair 성공 시 `_openFailed`도 해제.
 - 검증: `:app:assembleDebug` + `:app:testDebugUnitTest` 그린 (APK 2026-08-26 11:17, 21MB). **실기기 검증 대기**: 통신 단절(기기 잠금/데이터 끄기) 후 하네스에서 이벤트가 생기게 하고 복귀 → 배너가 잠깐 떴다가 history 재가져오기 완료 시 사라지는지 확인.
 - 한계: 구멍이 tail 페이지보다 크면 그 이하 메시지는 화면에서 빠지고 `hasMore`(Load older)로 복구 — web 클라이언트와 동일한 의미.
+
+### 11.9 세션 히스토리 레이스 4종 — **해결 (유닛 검증; 실기기/에뮬레이터 V1–V5 대기)**
+- 계획 문서: `docs/SESSION_HISTORY_RACE_FIX_PLAN.md` (RC1–RC4, C1–C6, T1–T6, V1–V5). 11.8의 gap repair 위에 이어서, **세션이 running(LLM 스트리밍) 중**에 (1) 위로 스크롤해 히스토리를 페이지닝한 뒤 (2) 다른(죽은) 세션으로 전환하고 (3) 핫 세션으로 복귀할 때의 4가지 비용을 제거.
+- **C1 — 읽기 위치 기억 (`oldestLoadedSeq`)**: `openSession()`이 항상 tail 페이지(`beforeSeq=null`)를 재요청해 페이지닝한 윈도우를 통째로 버리던 문제. 이제 각 세션 윈도우의 최상단 seq를 커서로 기억하고, 복귀 시 그 위치에서 페이지닝(복귀가 tail로 재앵커링되는 것 방지). 페이지 실패 시 커서 폐기(다음 open이 tail로 재앵커). `repairMissedEvents`/`loadOlder` 커밋에서도 커서 갱신.
+- **C2 — 범위 인지 stitch drain**: `drainStitchBufferLocked`가 버퍼 이벤트가 커밋된 페이지의 **시작 아래**에 있으면(= 그 페이지가 이미 그 구간을 커버) drop. 기존엔 `seq <= tail`만 drop해 페이지 시작 아래 이벤트를 tail 아래에 재삽입 → 다음 라이브 이벤트가 `tail+k (k>1)`로 착지해 가짜 gap → 배너 → repair 루프(건강한 라인에서).
+- **C3 — repair 한 번만 (`repairInFlight`)**: `repairMissedEvents`가 프레임 콜렉터에서 mutex 없이 발화돼 두 repair가 겹치던 문제. `fetchToken`이 두 번째 *commit*을 무효화했지만 두 fetch 모두 서버를 때림. 이제 fetch 진행 중이면 두 번째 트리거는 no-op(서버 요청 자체가 안 감).
+- **C4 — 설명 가능한 gap 억제**: fold의 `gap` 판정(`seq > lastSeq+1`)은 "다운링크가 죽은 동안 이벤트가 커밋됨"으로 해석하지만, 그 점프가 **클라이언트 쪽**(stitch 버퍼가 구멍을 이미 커버 / repair가 진행 중)이면 라인은 건강함. `rebuildCurrentLocked`가 버퍼/진행중 repair가 구멍을 덮으면 `gap=false`로 발행(배너 안 뜸), `handleSessionEvent`의 repair 트리거도 커버된 점프면 스킵. fold 자체는 순수함 유지(발행 스냅샷만 조정).
+- **C5 — 500 이벤트 윈도우 상한 (`MAX_WINDOW_EVENTS`)**: `loadOlder`만 prepending하고 evict가 없어 긴 세션 맨 위까지 페이지닝하면 **전체 히스토리가 RAM에** + 매 커밋 전체 재폴드(O(n²), 에이전트 실행 중=최악). 이제 커밋 후 head에서 500개로 트리밍, `hasMore=true` 유지(절단된 head는 "load older" 행으로 여전히 도달 가능, 커서=새 head). 메모리/퍼커밋 폴드 상한.
+- **테스트**: `app/src/test/.../data/SessionHistoryRaceTest.kt` 신규 — FakeApi(`DshApiClient` 서브클래스, `sessionHistory` 스크립트)+FakeConnectionManager+TestStore로 (a) **T1** 커서가 다음 `loadOlder`에 전달되는지(3번째 페이지가 tail이 아닌 기억된 커서 사용), (b) **T4** open 진행 중 라이브 버스트가 연속적으로 스티치되고 다음 프레임이 gap/repair를 안 일으키는지. (T2/T3/T5는 store의 비공개 `Dispatchers.Default` scope와의 크로스-스코프 게이트가 plain-JVM에서 불안정해 제거; 그 동작은 T1/T4 경로+프로덕션 가드로 커버, 최종 검증은 V1–V5.)
+- **테스트 가능성(최소, 문서화)**: `DshApiClient`/`ConnectionManager`/`HostsStore`/`SessionStore`를 `open`으로(테스트가 필요하는 특정 멤버만 `open`/`protected`), `repairMissedEvents`를 `internal`로(레이스 테스트가 직접 발화). `app/build.gradle.kts`에 `testOptions { unitTests { isReturnDefaultValues = true } }` 추가(JVM 유닛 테스트에서 `android.util.Log`가 throw하지 않게).
+- **변경 파일**: `app/.../data/SessionStore.kt`(C1–C5 전부 + `repairMissedEvents` internal), `core/.../wire/DshApiClient.kt`(open + `sessionHistory` open), `app/.../connection/ConnectionManager.kt`(open + `_state`/`api` protected), `app/.../connection/HostsStore.kt`(open + `lastSessionId` open), `app/build.gradle.kts`(testOptions), 신규 `app/src/test/.../data/SessionHistoryRaceTest.kt`, `CHANGELOG.md`([Unreleased] Fixed×2 + Improved×1).
+- **검증**: `:app:testDebugUnitTest` + `:core:test` 그린(99 app + core). **실기기/에뮬레이터 V1–V5 대기**(계획 §6): V1 복귀 시 tail이 아닌 기억된 위치로 착지, V2 페이지 시작 아래 버스트 후 gap=false, V3 겹친 repair=fetch 1회, V4 전환/복귀 후 tail이 아닌 기억된 위치, V5 `dumpsys meminfo` PSS가 히스토리 길이에 비례하지 않고 평탄.
+- **UX 영향**: C1이 유일한 사용자 가시 동작 변경(복귀 시 tail이 아닌 떠나던 위치로 착지) — V4로 검증. C5는 500개 넘게 페이지닝한 경우에만 "load older" 행이 다시 나타남(의도된 bounded-window UX, 깜빡임 주의).
+
+### 11.10 "Reading earlier messages…" 무한 루프 — **해결 완료 (에뮬레이터 실기 검증, 실제 백엔드)**
+- 증상: 세션을 위로 스크롤하면 "Loading earlier messages…"가 사라지지 않고 계속 반복, 아무것도 안 보임. 사용자: "memory protected but this endless loading again again is not fixed. worse."
+- **하네스 측은 정상임이 확인됨** (증상은 앱 버그였다): `host apiproxy`의 `paginate()`는 `maxMessages` 이하의 append-origin 메시지를 정확히 되돌리고, 전체가 한 페이지에 들어가면 `hasMore=false`를 정확히 보고. `api-proxy-view.spec.ts`(6건) 그린. 이 세션에서 잠깐 paginate를 고치려 시도했으나 이는 **오진**이었고 전부 되돌림 — 하네스 코드 변경 없음.
+- **근본 원인 (앱 `SessionStore.kt`)**: `loadOlder()`가 (1) `historyTail`(MAX_PAGE_EVENTS=4000 트림) 후 `overDelivered = events.size > page.size`를 계산하고, (2) `currentHasMore = freshCount>0 && (hostHasMore || overDelivered)`, (3) `trimWindowLocked()` 호출 — 이 트림이 **head(가장 오래된 이벤트, 방금 prepend한 블록)를 evict**하고 `currentHasMore=true`를 **무조건** 세움. 결과: 47메시지/9976이벤트 세션처럼 전체 히스토리가 한 호스트 페이지에 들어가는 경우(호스트 `hasMore=false`)에도, `overDelivered`(9976>4000)가 `hasMore=true`를 강제 → "load older" 행이 뜨고, `loadOlder`가 같은 페이지를 또 받아 prepend → `trimWindowLocked`가 그대로 evict → 매번 아무것도 안 보이고 `hasMore`는 계속 true → 무한 루프.
+- **수정 (`SessionStore.kt` `loadOlder()`)**: prepend한 오래된 블록을 **유지**(트림 제거 — 웹 클라이언트와 동일: 페이지된 히스토리는 RAM에 누적)하고, `currentHasMore = r.value.hasMore`로 **호스트 판정 신뢰**(`overDelivered`/`nextHasMore` OR 제거). `nextHasMore(freshCount, hostHasMore)`로 시그니처 단순화, `HistoryPagingTest` 갱신(overDelivered 무조건-true 케이스 제거). `openSession`/`repairMissedEvents`의 `|| overDelivered`는 유지(최초 open 시 트림이 숨긴 오래된 콘텐츠를 "load older"로 제공).
+- **검증 (에뮬레이터, 실제 `127.0.0.1:3080` 백엔드)**: (a) 루프 원인이던 세션(`% which dsh…`, 47메시지·9976이벤트, 호스트 `hasMore=false`) 열고 최상단까지 스크롤 → **"Loading earlier messages" 행 없음, 즉시 정지**; (b) 다중 페이지 세션(예: 60+메시지, 호스트 `hasMore=true`) 최상단까지 스크롤 → 중간 블록들을 하나씩 로드하고 실제 첫 콘텐츠("1.")에 도달 후 **정지(행 없음)**. 크래시 0. `:app:testDebugUnitTest`(HistoryPagingTest) + `:app:assembleDebug` 그린.
+- **한계/메모리**: 이제 loadOlder가 트림하지 않으므로 사용자가 계속 위로 페이지하면 페이지된 히스토리가 메모리에 누적됨(웹 클라이언트와 동일 의미). C5(500 윈도우)가 그대로 살아있더라도 loadOlder에서는 트리밍하지 않도록 했음 — 필요시 별도 bounded-window 재설계 추후.
+
+### 11.11 11.10 수정 후에도 지속된 "Loading earlier messages…" 재발 / 상태 소실 / 재탭 시 내용 변동 — 해결 완료 (에뮬레이터 실제 백엔드 재검증)
+- **사용자 재보고**: "'Loading earlier messages…' still repeats loading upto the top. the loaded session state goes lost. Every time I tap the session, the contents are different sometimes totally gone." — 11.10의 `loadOlder` 수정만으로는 해결 안 됨 (더 깊은 원인이 있었음).
+- **진짜 근본 원인 (모두 `SessionStore.kt`)**:
+  1. **`openSession`이 C1 재개 커서로 재검색**: `beforeSeq = oldestLoadedSeq[sessionId]`. 호스트의 `beforeSeq`는 "X보다 *오래된* 전부"를 의미하므로, 재탭 때마다 **다른 오래된 슬라이스**를 가져와 `currentEvents.clear()`+재조립 → "탭할 때마다 내용이 다름/사라짐".
+  2. **`trimWindowLocked()`가 매 open·매 live-append마다 head(방금 로드한 오래된 블록)를 evict하고 `currentHasMore=true`를 강제**: 로드한 상태가 날아가고("state lost") "load older" 행이 계속 재무장("endless loading").
+  3. **페이지/윈도우 상한이 콘텐츠를 잘라냄**: `MAX_PAGE_EVENTS=4000`(전체 히스토리가 한 페이지인 세션을 트림 → `overDelivered` 강제), `MAX_WINDOW_EVENTS=500`.
+- **수정**: (1) `openSession`은 **항상 tail(`beforeSeq=null`)로 결정적 개방** — 웹 클라이언트와 동일, 재탭 내용 변화 제거; C1 재개 커서(`oldestLoadedSeq`) **전체 제거** (더 이상 읽지 않음). (2) `trimWindowLocked()`에서 `currentHasMore=true` 강제 **제거** — 순수 안전 상한이 됨. (3) `MAX_PAGE_EVENTS`·`MAX_WINDOW_EVENTS`를 순수 안전 상한(`1_000_000`)으로 — 정상 페이지닝/스트리밍/재개방은 절대 안 닿아 콘텐츠 소실 없음. (4) `openSession`/`repairMissedEvents`/`loadOlder` 모두 `currentHasMore = r.value.hasMore`로 **호스트 판정 신뢰**, `overDelivered` OR 제거.
+- **행동**: 오픈 = 최신 tail(결정적). 위로 스크롤 → `loadOlder`가 블록 하나씩 prepend·유지 → 진짜 시작 도달 시 호스트 `hasMore=false` → 행 사라짐·정지. 재탭 = 항상 동일한 최신 tail.
+- **검증 (에뮬레이터, 실제 `127.0.0.1:3080`)**: (a) 완성 한 페이지 세션(Test APK crash) — 오픈 즉시 전체, **행 없음**, 시작 내용; (b) 완성 262메시지/19885이벤트 다중 페이지 세션 — 최신 60메시지(4495 이벤트) 오픈 후 최상단까지 페이지 → **진짜 첫 콘텐츠("1.") 도달 + 행 0개(hasMore=false 정지)**; (c) running 세션 — 시작 도달·콘텐츠 유지·행 1개로 안정(루프 아님); (d) 세션 이탈→복귀 — **동일 내용**(안정). `:app:testDebugUnitTest` 33건 그린, 크래시 0.
+- **메모리**: 사용자 우선순위(안정적 상태·무한 로딩 종료)에 따라 윈도우를 웹과 동일하게 가져가고, OOM 순수 안전망(1M)만 유지. 대형 live 세션 동안의 O(n) 재폴드 비용은 수용(정확성 우선).

@@ -57,19 +57,23 @@ data class ConnectionUiState(
  * handshake + reconnect/backoff), the foreground service binding for
  * background operation, and the UI state mirror. Single active host at a time.
  */
+/**
+ * `open` so unit tests can subclass it with a scripted [connectedApi] and a pre-seeded
+ * [state]; the production wiring always uses the injected constructor.
+ */
 @Singleton
-class ConnectionManager @Inject constructor(
+open class ConnectionManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val okHttpClient: OkHttpClient,
     private val hostsStore: HostsStore,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    private val _state = MutableStateFlow(ConnectionUiState())
+    protected val _state = MutableStateFlow(ConnectionUiState())
     val state: StateFlow<ConnectionUiState> = _state.asStateFlow()
 
     private var loop: ConnectionLoop? = null
-    private var api: DshApiClient? = null
+    protected var api: DshApiClient? = null
     private var activeHost: HostConfig? = null
 
     /** Downlink frame consumers (screens subscribe here). */

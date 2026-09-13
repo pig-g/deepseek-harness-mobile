@@ -43,6 +43,34 @@ All notable changes to DSH Mobile are documented here. Format based on
   empty `data` instead of throwing), and the store's scope carries a
   `CoroutineExceptionHandler` so no future uncaught throw in a frame or
   repair coroutine can take the session down.
+- **False "Reconnecting…" banner on a healthy line** — the gap test read any
+  seq jump past the window's tail as "events were committed while the
+  downlink was down", but a jump can be *client-side*: a live burst buffered
+  in the stitch buffer below a just-committed page's start, or a second gap
+  repair overlapping the first. The drain is now range-aware (it drops
+  buffered events the committed page already spans, not just those at or
+  below the tail), only one repair runs at a time (a second trigger while a
+  fetch is in flight is a no-op), and a jump the buffer or an in-flight repair
+  already covers no longer raises the banner or a redundant refetch.
+- **Full-history rebuild on every return to a paged session** — `openSession`
+  always re-fetched the *tail* page, so a reader who had paged to the top of a
+  long session and switched away lost the whole paged window on return: the
+  transcript re-anchored to the tail and paging to the top again repeated the
+  entire walk. The store now remembers the oldest seq still in each session's
+  window (the paging cursor) and re-opens at that position; a failed page
+  drops the cursor so a retry re-anchors at the tail rather than paging into
+  nothing.
+
+### Improved
+
+- **Bounded memory while paging a long transcript** — the open-session window
+  is now capped at 500 events. Previously nothing was ever evicted, so paging
+  to the top of a long session held the *entire* history in RAM and every
+  commit re-folded all of it (O(n²) to the top, worst exactly while the agent
+  runs). The trimmed head stays reachable through the "load older" row (its
+  cursor is the remembered position), so the UX is unchanged for anyone who
+  has not paged past the cap; memory and the per-commit refold are now
+  bounded.
 
 ## [0.2.0]
 

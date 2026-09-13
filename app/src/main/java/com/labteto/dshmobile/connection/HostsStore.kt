@@ -17,9 +17,14 @@ import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** Persists remembered hosts and app settings. */
+/**
+ * Persists remembered hosts and app settings.
+ *
+ * `open` so unit tests can subclass it with a no-op [lastSessionId]; the production wiring always
+ * uses the injected constructor.
+ */
 @Singleton
-class HostsStore @Inject constructor(
+open class HostsStore @Inject constructor(
     private val dataStore: DataStore<Preferences>,
 ) {
     private object Keys {
@@ -141,7 +146,7 @@ class HostsStore @Inject constructor(
      * used before. Keyed per host because session ids are host-scoped — one global key would try to
      * reopen a stale id from a different harness after every host switch.
      */
-    suspend fun lastSessionId(hostKey: String): String? = lastSessions()[hostKey]
+    open suspend fun lastSessionId(hostKey: String): String? = lastSessions()[hostKey]
 
     /** Remember [sessionId] as the landing session for [hostKey], keeping the newest 8 hosts. */
     suspend fun setLastSessionId(hostKey: String, sessionId: String) {

@@ -123,8 +123,11 @@ private fun encodeQueryComponent(value: String): String =
  * maps to one `POST /api/<method>` (see [rpcMapPath] for the path table) and returns [RpcResult]:
  * business failures arrive as HTTP 200 + `ok: false` and come back as [RpcResult.Err]; carrier
  * failures (non-2xx, transport, or decode) are folded into `RpcResult.Err` with code `internal`.
+ *
+ * `open` so unit tests can subclass it with a scripted `sessionHistory` (and friends) without a
+ * live transport; the production wiring always uses the real constructor.
  */
-class DshApiClient(
+open class DshApiClient(
     private val transport: RpcTransport,
     private val wsFactory: (path: String, sink: WsDownlinkSink) -> WsDownlink,
 ) {
@@ -229,7 +232,7 @@ class DshApiClient(
         call("session.create", request)
 
     /** session.history — reads a window of history events (tail page carries projections). */
-    suspend fun sessionHistory(request: SessionHistoryRequest): RpcResult<SessionHistoryValue> =
+    open suspend fun sessionHistory(request: SessionHistoryRequest): RpcResult<SessionHistoryValue> =
         call("session.history", request)
 
     /** session.models — reads a fresh advisory model directory. */

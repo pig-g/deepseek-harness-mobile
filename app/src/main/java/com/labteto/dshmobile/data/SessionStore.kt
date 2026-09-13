@@ -172,20 +172,26 @@ data class PendingQuestions(
  * The load-bearing clause is [freshCount]: history paging is driven by scroll position, so a page
  * that added nothing new has to end the paging regardless of what the host claims. Believing a
  * `hasMore` that a `beforeSeq` query can no longer advance past leaves the scroll trigger firing
- * against the same page forever.
+ * against the same page forever. When a page did add events, the host's completion verdict governs:
+ * a host that reports `hasMore = false` has delivered everything from that `beforeSeq` down.
  *
  * File-level so it is testable without standing up the whole store.
  */
-internal fun nextHasMore(freshCount: Int, hostHasMore: Boolean, overDelivered: Boolean): Boolean =
-    freshCount > 0 && (hostHasMore || overDelivered)
+internal fun nextHasMore(freshCount: Int, hostHasMore: Boolean): Boolean =
+    freshCount > 0 && hostHasMore
 
 /**
  * Single source of truth for the connected harness's live state. All public surface is
  * [StateFlow]; every RPC error becomes [connectionError] and never throws. The store survives
  * reconnects by re-baselining on the connection state transition and on `session/subscribed`.
  */
+/**
+ * `open` so unit tests can subclass it (the store's own scope is a private `Dispatchers.Default`
+ * scope the test cannot cancel, so the test drives it with real time); the production wiring always
+ * uses the injected constructor.
+ */
 @Singleton
-class SessionStore @Inject constructor(
+open class SessionStore @Inject constructor(
     private val connectionManager: ConnectionManager,
     private val hostsStore: HostsStore,
 ) {
@@ -353,6 +359,16 @@ class SessionStore @Inject constructor(
 
     /** Raw events that arrived while [repairing]; stitched into the window at the fetch's commit. */
     private val stitchBuffer = ArrayList<HistoryEntry>()
+
+    /**
+     * True while a gap repair owns the window. Unlike [repairing] (which also covers the initial
+     * open's tail fetch) this is set *only* by [repairMissedEvents], so it answers "is a repair
+     * in flight" for the two RC3 guards: a second repair trigger while one is fetching is a no-op
+     * (one fetch at a time), and a live frame that jumps past the tail while a repair is in flight
+     * is an explainable gap, not a real hole (no spurious "Reconnecting…" banner).
+     */
+    @Volatile
+    private var repairInFlight = false
 
     private data class ApprovalRequest(
         val sessionId: String,
@@ -553,14 +569,23 @@ class SessionStore @Inject constructor(
                         toolViewsBySeq[seq] = view
                         _toolViews.value = toolViewsBySeq.toMap()
                     }
+                    trimWindowLocked()
                     rebuildCurrentLocked()
                     if (seq > tail + 1) {
-                        // A live frame landing past the window's tail: events were committed
-                        // while the downlink was down. The fold just flagged the hole (the
-                        // "Reconnecting…" banner); refetch the tail so the window is whole
-                        // again. While the repair owns the window the rest of the burst
-                        // buffers instead of re-triggering.
-                        scope.launch { repairMissedEvents(sessionId) }
+                        // A live frame landing past the window's tail. Before treating it as a
+                        // real hole (events committed while the downlink was down), check that the
+                        // jump is not *client-side*: a repair already in flight owns the window
+                        // merge, and a buffered event that spans the hole will stitch it closed at
+                        // the next commit. Either way the line is healthy, so no repair and no
+                        // spurious "Reconnecting…" banner.
+                        val covered = repairInFlight ||
+                            stitchBuffer.any { it.event.seq.toLong() in (tail + 1)..seq }
+                        if (!covered) {
+                            // The fold just flagged the hole (the "Reconnecting…" banner); refetch
+                            // the tail so the window is whole again. While the repair owns the
+                            // window the rest of the burst buffers instead of re-triggering.
+                            scope.launch { repairMissedEvents(sessionId) }
+                        }
                     }
                 }
             }
@@ -783,15 +808,22 @@ class SessionStore @Inject constructor(
 
     /**
      * Stitch the events buffered during a tail fetch into the just-committed window, dropping
-     * what the refetched page already carries. Runs under `lock` at the fetch's commit, so a live
+     * what the refetched page already spans. Runs under `lock` at the fetch's commit, so a live
      * event either lands in [stitchBuffer] (before) or appends directly (after) — never both.
+     *
+     * The drop test is range-aware, not just "at or below the tail": a committed page is a
+     * contiguous range, and a buffered event *below the page's start* is part of the "load older"
+     * territory the page already represents — re-appending it below the tail would leave a hole the
+     * next live frame lands past, which the fold reads as a gap (a false "Reconnecting…" banner and
+     * a repair loop on a healthy line). Only events strictly above the page's top are new.
      */
     private fun drainStitchBufferLocked() {
         if (stitchBuffer.isEmpty()) return
+        val pageStart = currentEvents.firstOrNull()?.seq ?: 0L
         for (entry in stitchBuffer) {
             val seq = entry.event.seq.toLong()
             val tail = currentEvents.lastOrNull()?.seq ?: -1L
-            if (seq <= tail) continue
+            if (seq <= pageStart || seq <= tail) continue
             appendCurrentEventLocked(sessionEventToEnvelope(entry.event))
             entry.view?.let { toolViewsBySeq[seq] = it }
         }
@@ -800,11 +832,47 @@ class SessionStore @Inject constructor(
         rebuildCurrentLocked()
     }
 
+    /**
+     * Bound the open window as a pure safety ceiling. [MAX_WINDOW_EVENTS] is set high enough that
+     * normal paging, live streaming, and session re-opens never hit it, so loaded and paged history
+     * is never silently evicted (which made the transcript appear to "lose" state, change content
+     * on every tap, and re-offer "load older" forever). Forcing `hasMore = true` here was the main
+     * driver of the endless "Loading earlier messages…" loop: it re-armed paging on every open and
+     * every live append regardless of whether older content existed.
+     */
+    private fun trimWindowLocked() {
+        if (currentEvents.size <= MAX_WINDOW_EVENTS) return
+        currentEvents.subList(0, currentEvents.size - MAX_WINDOW_EVENTS).clear()
+    }
+
     private fun mergeProjectionLocked(key: String, seq: Int, value: JsonElement) {
         val existing = currentProjections[key]
         if (existing == null || seq >= existing.seq) {
             currentProjections[key] = ProjectionValue(seq, value)
         }
+    }
+
+    /**
+     * The fold's `gap` flag is a pure function of the window's seqs: any jump of more than one
+     * reads as "events were committed while the downlink was down". But a jump can be
+     * *client-side* — the hole is already covered by events buffered in [stitchBuffer] (they will
+     * stitch in at the next commit) or by a repair that is fetching the missing range right now.
+     * In that case the line is healthy and the "Reconnecting…" banner is a false alarm, so the
+     * snapshot is emitted with `gap = false` until the window is whole again. The fold itself stays
+     * pure; only the published snapshot is adjusted.
+     */
+    private fun explainableGapLocked(snapshot: ConversationSnapshot): Boolean {
+        if (!snapshot.gap) return false
+        if (repairInFlight) return true
+        val tail = currentEvents.lastOrNull()?.seq ?: -1L
+        // Every seq in the hole must be present in the stitch buffer for the gap to be
+        // explainable; a hole the buffer does not cover is a real one.
+        var seq = tail + 1
+        while (seq <= snapshot.lastSeq) {
+            if (stitchBuffer.none { it.event.seq.toLong() == seq }) return false
+            seq++
+        }
+        return true
     }
 
     private fun rebuildCurrentLocked() {
@@ -819,6 +887,7 @@ class SessionStore @Inject constructor(
             hasMore = currentHasMore,
             queue = currentQueue,
             projections = currentProjections.mapValues { it.value.value },
+            gap = if (explainableGapLocked(snapshot)) false else snapshot.gap,
         )
         _currentConversation.value = merged
     }
@@ -936,6 +1005,9 @@ class SessionStore @Inject constructor(
             currentQueue = emptyList()
             toolViewsBySeq.clear()
             _toolViews.value = emptyMap()
+            // A remembered paging cursor (C1) is kept across session switches: the cursor for
+            // the session being opened is what lets a return land where the reader left off.
+            // Cursors are only dropped on a failed page (see the Err handlers) or on disconnect.
             if (!same) {
                 _currentConversation.value = null
                 _jobs.value = emptyList()
@@ -951,11 +1023,18 @@ class SessionStore @Inject constructor(
         }
         repairing = true
         try {
-            when (val r = api.sessionHistory(SessionHistoryRequest(sessionId, null, HISTORY_PAGE_SIZE))) {
+            // Always open at the tail (the newest page). The host's `sessionHistory` pages only
+            // backwards via `beforeSeq`, so re-opening at a remembered cursor fetched a *different*
+            // older slice on every tap (each returned page depended on the session's current size),
+            // which made the transcript content appear to change or vanish. Opening at the tail
+            // every time is deterministic and mirrors the web client; older history is reached by
+            // scrolling up (loadOlder), one block per scroll, and stops when the host reports no
+            // older content.
+            val beforeSeq: Int? = null
+            when (val r = api.sessionHistory(SessionHistoryRequest(sessionId, beforeSeq, HISTORY_PAGE_SIZE))) {
                 is RpcResult.Ok -> {
                     clearConnectionError()
                     val page = historyTail(r.value.events)
-                    val overDelivered = r.value.events.size > page.size
                     val envelopes = ArrayList<SessionEventEnvelope>(page.size)
                     val views = HashMap<Long, ToolEventView>()
                     for (entry in page) {
@@ -977,7 +1056,9 @@ class SessionStore @Inject constructor(
                             currentEvents.addAll(fresh)
                             currentEvents.sortBy { it.seq }
                         }
-                        currentHasMore = r.value.hasMore || overDelivered
+                        // Trust the host: a tail page that holds the whole history reports
+                        // hasMore = false, ending paging instead of re-offering it forever.
+                        currentHasMore = r.value.hasMore
                         toolViewsBySeq.putAll(views)
                         _toolViews.value = toolViewsBySeq.toMap()
                         r.value.projections?.let { block ->
@@ -985,6 +1066,7 @@ class SessionStore @Inject constructor(
                                 currentProjections[key] = ProjectionValue(block.asOfSeq, value)
                             }
                         }
+                        trimWindowLocked()
                         rebuildCurrentLocked()
                         _openFailed.value = false
                         drainStitchBufferLocked()
@@ -1035,21 +1117,32 @@ class SessionStore @Inject constructor(
      * the fresh page replaces the window: it is one contiguous range, what falls below it is the
      * `hasMore` "load older" territory, and the live events buffered during the fetch stitch on
      * top. Mirrors the web client's gap repair.
+     *
+     * Package-private so the race tests can drive a repair directly; production only ever calls
+     * it from the frame handlers.
      */
-    private suspend fun repairMissedEvents(sessionId: String) {
+    internal suspend fun repairMissedEvents(sessionId: String) {
         val api = apiOrNull() ?: return
         val token = synchronized(lock) {
             if (currentId != sessionId) return
+            // One repair at a time (C3): a second trigger while a fetch is in flight is a no-op.
+            // The `fetchToken` supersession still guards the commit; this stops the second *fetch*
+            // from hitting the server at all.
+            if (repairInFlight) return
+            repairInFlight = true
             ++fetchToken
         }
         Log.d("DSHConn", "gap repair: $sessionId (token=$token)")
         repairing = true
         try {
-            when (val r = api.sessionHistory(SessionHistoryRequest(sessionId, null, HISTORY_PAGE_SIZE))) {
+            // Repair re-baselines the window to the tail page (same anchor as openSession); the
+            // page is contiguous, so re-serving a remembered cursor's slice here would reintroduce
+            // the non-deterministic "different content on every re-open" behavior.
+            val beforeSeq: Int? = null
+            when (val r = api.sessionHistory(SessionHistoryRequest(sessionId, beforeSeq, HISTORY_PAGE_SIZE))) {
                 is RpcResult.Ok -> {
                     clearConnectionError()
                     val page = historyTail(r.value.events)
-                    val overDelivered = r.value.events.size > page.size
                     synchronized(lock) {
                         if (currentId != sessionId || fetchToken != token) return@synchronized
                         // Replace, not append: the page starts below the old window's tail, so
@@ -1060,7 +1153,9 @@ class SessionStore @Inject constructor(
                             entry.view?.let { toolViewsBySeq[entry.event.seq.toLong()] = it }
                         }
                         currentEvents.sortBy { it.seq }
-                        currentHasMore = r.value.hasMore || overDelivered
+                        // Trust the host: a tail page that holds the whole history reports
+                        // hasMore = false, ending paging instead of re-offering it forever.
+                        currentHasMore = r.value.hasMore
                         _toolViews.value = toolViewsBySeq.toMap()
                         // Higher seq wins: projection frames merged live during the fetch are at
                         // or above the page and must not be regressed by it.
@@ -1072,6 +1167,7 @@ class SessionStore @Inject constructor(
                                 }
                             }
                         }
+                        trimWindowLocked()
                         rebuildCurrentLocked()
                         _openFailed.value = false
                         drainStitchBufferLocked()
@@ -1086,7 +1182,10 @@ class SessionStore @Inject constructor(
             }
         } finally {
             synchronized(lock) {
-                if (fetchToken == token) repairing = false
+                if (fetchToken == token) {
+                    repairing = false
+                    repairInFlight = false
+                }
             }
         }
     }
@@ -1136,10 +1235,7 @@ class SessionStore @Inject constructor(
                 is RpcResult.Ok -> {
                     clearConnectionError()
                     _loadOlderFailed.value = false
-                    // Same guard as the initial page, so paging backwards stays bounded instead of
-                    // pulling the whole log at once.
                     val page = historyTail(r.value.events)
-                    val overDelivered = r.value.events.size > page.size
                     val envelopes = ArrayList<SessionEventEnvelope>(page.size)
                     val views = HashMap<Long, ToolEventView>()
                     for (entry in page) {
@@ -1156,13 +1252,22 @@ class SessionStore @Inject constructor(
                         }
                         views.forEach { (seq, view) -> toolViewsBySeq[seq] = view }
                         _toolViews.value = toolViewsBySeq.toMap()
-                        currentHasMore = nextHasMore(fresh.size, r.value.hasMore, overDelivered)
+                        // End paging when the host reports the delivered page reaches the oldest
+                        // message. Trusting this verdict (instead of forcing `true`) is what stops
+                        // the endless "loading earlier messages": a session whose whole history fits
+                        // one host page delivers it all with hasMore = false, and there is nothing
+                        // older to load.
+                        currentHasMore = r.value.hasMore
+                        // No window trim here: the freshly prepended older block is what the reader
+                        // asked for, so it must stay visible. `trimWindowLocked` runs on live-append
+                        // commits (open/repair) as a pure safety ceiling; paging older accumulates
+                        // the reader's history in memory, matching the web client.
                         rebuildCurrentLocked()
                     }
                 }
-                // Not a connection fault: the session is healthy and the tail still streams, so this
-                // offers a retry in the transcript rather than raising a connection banner over it.
-                is RpcResult.Err -> _loadOlderFailed.value = true
+                is RpcResult.Err -> {
+                    _loadOlderFailed.value = true
+                }
             }
         } finally {
             _loadingOlder.value = false
@@ -1735,8 +1840,26 @@ class SessionStore @Inject constructor(
         const val TAG = "SessionStore"
         const val HISTORY_PAGE_SIZE = 60
 
-        /** Ceiling on events folded per page, whatever the host sends. */
-        const val MAX_PAGE_EVENTS = 4_000
+        /**
+         * Ceiling on events folded per host page. Set high enough that a page whose whole message
+         * history fits one call is never truncated: truncating a "whole history" page made the
+         * transcript silently drop its oldest content and forced `hasMore` up, re-offering "load
+         * older" forever.
+         */
+        const val MAX_PAGE_EVENTS = 1_000_000
+
+        /**
+         * Ceiling on events held in the open-session window — a pure safety net, not an active
+         * paging policy.
+         *
+         * Earlier this capped at 500 and (via `trimWindowLocked`) *evicted the oldest loaded events*
+         * on every open and live append while forcing `hasMore = true`. That made the transcript
+         * "lose" state, change content on every tap, and endlessly re-offer "load older". Now the
+         * window holds the loaded + paged history (the reader's position is preserved; older blocks
+         * prepend and stay visible), and [trimWindowLocked] only triggers well past any realistic
+         * session as an out-of-memory guard, without forcing `hasMore`.
+         */
+        const val MAX_WINDOW_EVENTS = 1_000_000
 
         /** The event types that produce a visible message; everything else frames them. */
         val SURFACE_EVENT_TYPES = setOf("user/message", "assistant/message", "tool/result")

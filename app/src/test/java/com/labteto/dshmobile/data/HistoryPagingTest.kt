@@ -16,23 +16,13 @@ class HistoryPagingTest {
 
     @Test
     fun `a page that added nothing ends the paging even when the host says otherwise`() {
-        assertFalse(nextHasMore(freshCount = 0, hostHasMore = true, overDelivered = true))
-        assertFalse(nextHasMore(freshCount = 0, hostHasMore = true, overDelivered = false))
-        assertFalse(nextHasMore(freshCount = 0, hostHasMore = false, overDelivered = false))
+        assertFalse(nextHasMore(freshCount = 0, hostHasMore = true))
+        assertFalse(nextHasMore(freshCount = 0, hostHasMore = false))
     }
 
     @Test
     fun `a page that added events keeps the host's verdict`() {
-        assertTrue(nextHasMore(freshCount = 12, hostHasMore = true, overDelivered = false))
-        assertFalse(nextHasMore(freshCount = 12, hostHasMore = false, overDelivered = false))
-    }
-
-    /**
-     * Some builds ignore `maxMessages` and answer with the whole log; the client trims and reports
-     * the remainder as more to come, which must survive even when the host claims completeness.
-     */
-    @Test
-    fun `a trimmed over-delivery counts as more to come`() {
-        assertTrue(nextHasMore(freshCount = 60, hostHasMore = false, overDelivered = true))
+        assertTrue(nextHasMore(freshCount = 12, hostHasMore = true))
+        assertFalse(nextHasMore(freshCount = 12, hostHasMore = false))
     }
 }

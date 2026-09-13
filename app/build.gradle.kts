@@ -101,6 +101,12 @@ android {
         // `HardcodedText` is deliberately absent: it only inspects XML layouts, and this app has
         // none. Compose string literals have to be caught in review.
     }
+
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
