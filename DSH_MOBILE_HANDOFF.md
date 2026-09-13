@@ -7,7 +7,9 @@
 
 사용자가 보고한 핵심 문제: **새/기존 세션을 열었을 때 "초기화(initializing)" 또는 "첫 전송이 안 되는" 상태가 비정상적으로 오래 지속됐다가 갑자기 정상화**된다. 렌더링 버그는 이미 해결됐고, **근본 원인을 확정하고 수정 완료**했다. 핵심 원인은 **Compose 상태 라이프사이클 문제**: 세션 전환 시 `Composer`(TextField + Send 버튼)가 재구성(recompose)만 되고 재생성(recreate)되지 않아 TextField의 내부 상태(IME 연결, 커서)가 stale → Send 버튼이 반응하지 않음. 화면 회전 시 Activity 재생성으로 Compose 트리가 새로 만들어져 즉시 해결되는 것이 사용자의 단서. **`key(currentSessionId)`로 Composer를 강제 재생성**하여 해결. **사용자 실기기 검증 완료.**
 
-**최신 작업 (2026-08-26)**: 세션이 running 중 페이지닝→전환→복귀 시의 **세션 히스토리 레이스 4종**을 수정 — (C1) 읽기 위치 기억(복귀 시 tail이 아닌 떠나던 위치), (C2) 범위 인지 stitch drain, (C3) repair 한 번만, (C4) 설명 가능한 gap 억제(가짜 "Reconnecting…" 배너 제거), (C5) 500 이벤트 윈도우 상한(메모리/재폴드 상한). 유닛 검증 완료, **실기기/에뮬레이터 V1–V5 검증 대기**. 상세: **섹션 11.9**.
+**최신 작업 (2026-09-13)**: 하네스 설정 UI(`Settings → Harness`)가 **폰 화면에 안 들어가던 문제**를 수정. `DsBottomSheet`가 content를 스크롤 컨테이너·높이 상한 없이 그냥 `Column`에 넣어서, 화면보다 큰 시트는 **꼬리(그리고 마지막 자식인 액션 버튼)가 잘려 접근 불가**였다. "Add custom provider"가 최악(모델 행 추가마다 2줄씩 증가) → **Create/Save 버튼을 누를 수 없음**. 시트 body 스크롤 + 뷰포트 상한 + **고정 `footer` 슬롯**으로 근본 수정(하네스 시트 3종이 footer 사용). **에뮬레이터 실기 검증 완료.** 상세: **섹션 11.12**.
+
+> **문서 정합성 주의**: §11.9의 (C1)과 (C5, 500 이벤트 상한)은 **§11.11에서 되돌려졌다**(무한 "Loading earlier messages" 루프의 진짜 원인이 그 트리밍이었음). §7 항목 7의 V1("떠나던 위치로 복귀")은 **더 이상 유효한 기대가 아니다** — §11.11 기준 동작은 "항상 tail로 결정적 개방"이다. **§11.11이 현재 진실**이며, §11.9는 이력으로만 읽어야 한다.
 
 ---
 
@@ -150,18 +152,29 @@
 4. **[완료] 큐-앤-오토-플러시**: RECONNECTING 중 전송 시 메시지 큐잉 후 재접속 시 자동 전송.
 5. **[완료] 진단 로그**: `DSHSend` (send 게이트별), `DSHConn` (phase 변경, generation 실패, session/subscribed).
 6. **[완료 — 사용자 실기기 검증됨] UX 개선 — 섹션 11.6/11.7 참조**: (a) "runtime-context 스냅샷" user/message를 거대 버블 대신 **접을 수 있는 "Context" disclosure 행**으로 렌더(플러그인 source `@deepseek-ai/dsh-system-prompt`, `form:"snapshot"` 판별, 섹션 11.6); (b) `ask_user_question` 모바일 오작동 2건 수정 — 질문 알림 dedup(rpcId 기반) + pending 질문 세션별 Map화(섹션 11.7).
-7. **[완료 — 유닛 검증; 실기기/에뮬레이터 V1–V5 대기] 세션 히스토리 레이스 4종 수정 — 섹션 11.9 참조**: running 세션에서 페이지닝→전환→복귀 시 (C1) 읽기 위치 기억, (C2) 범위 인지 stitch drain, (C3) repair 한 번만, (C4) 설명 가능한 gap 억제(가짜 "Reconnecting…" 배너 제거), (C5) 500 이벤트 윈도우 상한. `SessionHistoryRaceTest`(T1/T4) 유닛 그린. **다음 세션**: 에뮬레이터/실기기에서 V1–V5 확인(§11.9 "검증" 항목) — 특히 V1(복귀 시 tail이 아닌 기억된 위치 착지)과 V5(`dumpsys meminfo` PSS 평탄).
+7. **[부분 폐기 — §11.11 참조] 세션 히스토리 레이스 4종 — 섹션 11.9**: (C2) 범위 인지 stitch drain, (C3) repair 단일화, (C4) 설명 가능한 gap 억제는 **유효하게 유지**. 그러나 **(C1) 재개 커서와 (C5) 500 이벤트 상한은 §11.11에서 제거/무력화**되었다 — 그 트리밍이 무한 "Loading earlier messages"의 원인이었기 때문. **§11.9의 V1·V5는 더 이상 검증 대상이 아니다**(V1이 기대하는 "기억된 위치 복귀" 동작 자체가 사라짐). 남은 검증 대상은 §11.10/§11.11의 "검증 (에뮬레이터, 실제 백엔드)" 항목이며, 이는 **이미 통과 기록됨**.
+8. **[완료 — 에뮬레이터 실기 검증됨, 커밋 `927c1dc`] 하네스 설정 UI가 폰 화면에 안 들어가던 문제 — 섹션 11.12 참조**: `DsBottomSheet`가 스크롤 컨테이너·높이 상한 없이 content를 `Column`에 넣어, 화면보다 큰 시트의 **꼬리와 마지막 자식인 액션 버튼이 잘려 접근 불가**. "Add custom provider"의 Create/Save가 눌리지 않던 것이 사용자 보고 증상. 시트 body 스크롤 + `fillMaxHeight(0.92f)` 상한 + **고정 `footer` 슬롯**(+ IME inset 소비)으로 근본 수정.
+9. **[미진행] 잔여 UI 개선 후보**: (a) `SheetCommands` 스크롤 2단계(내부 bounded `LazyColumn` 2개가 새 스크롤 body 안에 중첩) — 기능은 정상, UX만 어색; (b) `ModelRowsEditor`가 행당 `weight(1f)` 필드 2개라 좁은 폰에서 빡빡함(라벨이 길면 더 심함) — 1열 재배치 후보; (c) `SheetPresets`/`SheetSubagents` 등 나머지 시트는 이제 primitive 덕에 스크롤되지만 개별 점검은 미실시.
 
 ---
 
 ## 8. 에뮬레이터 / 자동화 메모
 
-- 기기: `emulator-5554` (Medium_Phone, headless, Android 15). **부팅 시 `danger-full-access` escalation 필수** — 에뮬레이터가 `~/.android/`에 lock 파일(`snapshot.lock`, `multiinstance.lock`, `hardware-qemu.ini.lock`) 생성해야 하는데 workspace-write 샌드박스가 이를 막으면 "A snapshot operation ... is pending and timeout has expired" FATAL 발생.
-- 터널링: `adb reverse tcp:3080 tcp:3080` (재부팅/재설치 후 **반드시 재설정**; 안 하면 앱이 Connect 화면으로 빠짐).
-- 재설치 후 콜드 스타트: `adb shell am force-stop com.labteto.dshmobile.debug` → `am start -n ...MainActivity`.
+- 기기: `emulator-5554`, headless. **부팅 시 `danger-full-access` escalation 필수** — 에뮬레이터가 워크스페이스 밖(`~/.android/`, AVD 홈)에 lock 파일(`snapshot.lock`, `multiinstance.lock`, `hardware-qemu.ini.lock`)을 만들어야 하는데 workspace-write 샌드박스가 이를 막으면 `FATAL | A snapshot operation for '<AVD>' is pending and timeout has expired. Exiting...` 로 즉사한다(2026-09-13 재확인).
+- **AVD 이름 주의 (2026-09-13 정정)**: 이전 세션 기록의 `Medium_Phone`은 **이 환경에 없다**. `emulator -list-avds`가 보여주는 것 중 **실제로 부팅되는 것은 `Pixel_8`** 이며, AVD는 샌드박스 로컬에 있다:
+  ```bash
+  export ANDROID_AVD_HOME=/Users/heavens3/deepseek/deepseek-harness-mobile/.avd-home   # Pixel_8.ini / Pixel_8.avd
+  export ANDROID_USER_HOME=/Users/heavens3/deepseek/deepseek-harness-mobile/.android-home
+  $ANDROID_HOME/emulator/emulator -avd Pixel_8 -no-window -no-audio -no-snapshot -gpu swiftshader_indirect
+  ```
+  `ANDROID_AVD_HOME`를 안 주면 `Unknown AVD name [Medium_Phone]`, 잘못 주면 `no file Medium_Phone.ini in $ANDROID_AVD_HOME`로 실패한다. 화면은 **1080x2400 @ 420dpi**(geometry 검증 시 이 좌표계 기준).
+- 최초 실행 시 시스템 권한 다이얼로그(`GrantPermissionsActivity`, POST_NOTIFICATIONS)가 포커스를 가로챈다 → `adb shell pm grant com.labteto.dshmobile.debug android.permission.POST_NOTIFICATIONS` 후 재시작.
+- 터널링: `adb reverse tcp:3080 tcp:3080` (재부팅/재설치 후 **반드시 재설정**; 안 하면 앱이 Connect 화면으로 빠짐). 이 환경에서 하네스는 실제로 `127.0.0.1:3080`에서 200을 반환한다.
+- 재설치 후 콜드 스타트: `adb shell am force-stop com.labteto.dshmobile.debug` → `am start -n ...MainActivity`. **앱은 마지막 세션을 자동 재개**하므로, 검증 중이면 대화 화면이 아니라 **원하는 화면으로 직접 내비게이션**해야 한다(설정 경로: drawer 터뷸 > `Settings` > 스크롤 > `Harness settings` > 탭).
 - 앱 연결이 Connect 화면에 있으면 "Recent > This device (loopback)" 행(~520,838) 탭 또는 host=127.0.0.1→Connect.
 - **주의(중요): adb `input text` / `input keyevent` 모두 Compose TextField와 desync** → `draft`가 빈 채로 남아 `send()`가 `text.isBlank()`로 조용히 리턴. `DSHSend` 로그로 `draft len=0` 확인됨. 이는 **자동화 한계이지 버그 아님**. 사람이 직접 타이핑하면 정상.
-- **대체 검증 방법**: UI 타이핑이 안 되므로 harness API(curl `session.prompt`)로 직접 프롬프트 전송 → 앱의 events.mux 다운링크가 이벤트를 수신해 렌더하는지로 검증. 이 방법으로 더블오픈 레이스 수정 검증 완료.
+- **기하(geometry) 검증은 `uiautomator dump`가 정답**: `adb shell uiautomator dump /sdcard/ui.xml && adb pull /sdcard/ui.xml` 후 노드의 `text`/`content-desc` + `bounds`를 파싱하면, 버튼이 화면 안에 있는지·스크롤 후 좌표가 고정인지(=`footer` 고정 증명)를 **정량적으로** 확인할 수 있다. 이 세션의 시트 수정 검증이 전부 이 방법(§11.12). 스크린샷은 이미지 입력이 가능한 모델에서만 유용(현재 모델은 이미지 입력 불가).
+
 - Send 버튼 탭은 IME 닫힌 상태에서 좌표가 안정적: `(970,2189)` (버튼 bounds `[907,2128][1033,2251]`). IME 켜진 상태면 레이아웃이 밀려 좌표가 달라짐 → keyevent 4로 IME 먼저 닫기.
 - 최신 빌드를 에뮬레이터에서 콜드 스타트했을 때: 연결·세션 열기 정상, 변경 코드 크래시/예외 0건 확인됨.
 
@@ -203,8 +216,8 @@
 - `app/.../ui/screens/main/ChatTranscript.kt` (openFailed → TranscriptRefresh)
 - `app/src/main/res/values/strings.xml` (chat_open_failed, chat_open_retry)
 
-**세션 히스토리 레이스 4종 (섹션 11.9)**:
-- `app/.../data/SessionStore.kt` — C1 `oldestLoadedSeq` 커서(openSession/repair/loadOlder 커밋+Err 폐기), C2 범위 인지 `drainStitchBufferLocked`, C3 `repairInFlight`, C4 `explainableGapLocked`+repair 트리거 커버 판정, C5 `trimWindowLocked`/`MAX_WINDOW_EVENTS=500`; `repairMissedEvents`를 `internal`로
+**세션 히스토리 레이스 4종 (섹션 11.9, 이후 §11.11에서 일부 되돌림)**:
+- `app/.../data/SessionStore.kt` — C2 범위 인지 `drainStitchBufferLocked`, C3 `repairInFlight`, C4 `explainableGapLocked`+repair 트리거 커버 판정은 **유지**. **(C1) `oldestLoadedSeq`는 §11.11에서 완전 제거**, **(C5) `trimWindowLocked`/`MAX_WINDOW_EVENTS`는 순수 안전 상한(1M)으로 무력화** — 트리밍이 무한 로딩의 원인이었음. `repairMissedEvents`는 `internal`.
 - `core/.../wire/DshApiClient.kt` — `open class` + `sessionHistory` open (테스트 서브클래스용)
 - `app/.../connection/ConnectionManager.kt` — `open class` + `_state`/`api` protected
 - `app/.../connection/HostsStore.kt` — `open class` + `lastSessionId` open
@@ -212,7 +225,11 @@
 - 신규 `app/src/test/.../data/SessionHistoryRaceTest.kt` (T1 커서 전달, T4 open 진행 중 버스트 스티칭)
 - `CHANGELOG.md` — [Unreleased] Fixed×2(가짜 Reconnecting 배너, 복귀 시 전체 히스토리 재빌드) + Improved×1(500 이벤트 윈도우 상한)
 
-**현재 상태**: 결정적 근본 원인(Compose 상태 라이프사이클 — 세션 전환 시 TextField/IME stale) 확정·수정·**사용자 실기기 검증 완료**. `key(currentSessionId)`로 Composer 강제 재생성이 핵심 픽스. 보조로 openSession 이벤트 유실 레이스(seq 머지), 다운링크 튜닝(pingInterval/handshake timeout), 큐-앤-오토-플러시, 진단 로그 추가. **최신: 세션 히스토리 레이스 4종(C1–C5) 수정 — 유닛 검증 완료, 실기기/에뮬레이터 V1–V5 대기(§11.9)**. 앱 빌드/실행 정상, 콜드 스타트 크래시 없음. **렌더링·무한 초기화·새 세션 Send 무반응·이벤트 유실·침묵 전송·가짜 Reconnecting 배너·복귀 시 전체 재빌드·무한 메모리 모두 해결됨.**
+**시트 레이아웃 근본 수정 (섹션 11.12, 커밋 `927c1dc`)**:
+- `app/.../ui/components/DsBottomSheet.kt` — body를 `weight(1f, fill=false) + verticalScroll`로, 시트 높이 `fillMaxHeight(0.92f)` 상한, **신규 `footer` 슬롯**(스크롤 영역 밖 고정, divider 포함), `contentWindowInsets`에 `ime` 합집합
+- `app/.../ui/screens/harness/HarnessProviderEditor.kt` — `ProviderEditorSheet`/`CustomProviderSheet`/`DiscoverModelsSheet` 3종의 액션 Row를 `footer`로 이동; 프로토콜 칩 Row에 `horizontalScroll`; discovery 결과 리스트의 중첩 `verticalScroll` 제거
+
+**현재 상태**: 결정적 근본 원인(Compose 상태 라이프사이클 — 세션 전환 시 TextField/IME stale) 확정·수정·**사용자 실기기 검증 완료**. `key(currentSessionId)`로 Composer 강제 재생성이 핵심 픽스. 보조로 openSession 이벤트 유실 레이스(seq 머지), 다운링크 튜닝(pingInterval/handshake timeout), 큐-앤-오토-플러시, 진단 로그 추가. 세션 히스토리 레이스는 §11.9(C1–C5) → §11.10 부분 수정 → **§11.11에서 진짜 원인 규명 및 C1 제거·C5 무력화**(현재 진실). **최신: 하네스 설정 UI가 폰 화면에 안 들어가던 문제(시트 꼬리·액션 버튼 클리핑)를 primitive 수준에서 수정 — 에뮬레이터 실기 검증 완료(`927c1dc`)**. 유닛 테스트 160건(앱 98 + 코어 62) 전부 그린, 앱 빌드/실행 정상, 크래시 0건. **렌더링·무한 초기화·새 세션 Send 무반응·이벤트 유실·침묵 전송·가짜 Reconnecting 배너·무한 로딩 루프·폰 화면 초과 시트 모두 해결됨.**
 
 ---
 
@@ -326,3 +343,24 @@
 - **행동**: 오픈 = 최신 tail(결정적). 위로 스크롤 → `loadOlder`가 블록 하나씩 prepend·유지 → 진짜 시작 도달 시 호스트 `hasMore=false` → 행 사라짐·정지. 재탭 = 항상 동일한 최신 tail.
 - **검증 (에뮬레이터, 실제 `127.0.0.1:3080`)**: (a) 완성 한 페이지 세션(Test APK crash) — 오픈 즉시 전체, **행 없음**, 시작 내용; (b) 완성 262메시지/19885이벤트 다중 페이지 세션 — 최신 60메시지(4495 이벤트) 오픈 후 최상단까지 페이지 → **진짜 첫 콘텐츠("1.") 도달 + 행 0개(hasMore=false 정지)**; (c) running 세션 — 시작 도달·콘텐츠 유지·행 1개로 안정(루프 아님); (d) 세션 이탈→복귀 — **동일 내용**(안정). `:app:testDebugUnitTest` 33건 그린, 크래시 0.
 - **메모리**: 사용자 우선순위(안정적 상태·무한 로딩 종료)에 따라 윈도우를 웹과 동일하게 가져가고, OOM 순수 안전망(1M)만 유지. 대형 live 세션 동안의 O(n) 재폴드 비용은 수용(정확성 우선).
+
+### 11.12 하네스 설정 UI가 폰 화면에 안 들어감 (시트 꼬리·액션 버튼 클리핑) — **해결 완료 (에뮬레이터 실기 검증, 커밋 `927c1dc`)**
+- **사용자 보고**: "We added setup menu ui to mobile app but It doesn't fit to phone screen size. The problem is custom llm model add ui is bigger than phone screen and not scrollable that I cannot push create button. In fact not usable. Other ui chapters or components could have same issues."
+- **근본 원인 (`DsBottomSheet.kt`)**: content를 **스크롤 컨테이너도 높이 상한도 없는 평범한 `Column`**에 넣고 있었다. `ModalBottomSheet`는 화면을 넘을 수 없으므로, 뷰포트보다 큰 시트는 **꼬리가 잘리고** — 게다가 **액션 버튼이 마지막 자식**이라 **접근 불가**가 됨(out of composition이 아니라 화면 밖이라 스크롤로도 도달 불가).
+- **왜 "Add custom provider"가 최악인가**: 전체 폼(route, display name, protocol 칩, base URL, API key, 그리고 **모델 1개당 2줄(4필드)**인 모델 카탈로그 에디터)이라 모델 행을 추가할수록 무한히 커지고, Create/Save가 맨 끝 → **재현성 있게 실패**(운에 따라 되는 게 아님).
+- **스크롤이 호출부마다 제각각이라 살아남은 시트가 운이었음**: `SheetModels`는 `heightIn(max=420.dp)+verticalScroll`로 자체 방어, `SheetCommands`는 bounded `LazyColumn`(260dp/220dp) 사용, 반면 **하네스 시트 3종은 아무것도 없었음**.
+- **수정 (primitive에서, 9개 시트 전부 혜택)**:
+  1. body를 `weight(1f, fill = false) + verticalScroll(rememberScrollState())`로 감쌈 — `fill=false`가 핵심: **짧은 시트는 content 크기에 맞춰지고(빈 공간 없음)**, 큰 시트만 남은 높이를 차지하고 내부 스크롤.
+  2. 시트 높이를 `fillMaxHeight(0.92f)`로 상한 → 스크림 여백 유지, 상태바와 충돌 없음.
+  3. **신규 `footer` 슬롯**: 스크롤 영역 **밖**에 divider와 함께 고정 렌더 → 폼이 아무리 길어져도 **주 액션이 항상 도달 가능**.
+  4. `contentWindowInsets`를 `WindowInsets.navigationBars.union(WindowInsets.ime)`로 — 텍스트 위주 시트라 키보드가 하단 필드를 가리지 않게.
+- **호출부 정리 (`HarnessProviderEditor.kt`)**: `CustomProviderSheet`(Cancel/Save), `ProviderEditorSheet`(검증 메시지 + Cancel/Save), `DiscoverModelsSheet`(Fetch/Apply) 3종의 액션 Row를 `footer`로 이동. `ProviderEditorSheet`는 검증 변수(`keyFailure`/`modelFailure`/`apiMissing`)를 `DsBottomSheet` 호출 **위로** 끌어올려야 했음(footer가 body의 형제라 스코프 공유 안 됨). 프로토콜 칩 Row에 `horizontalScroll` 추가(긴 `openai-completions`/`anthropic-messages` 라벨이 화면 밖으로 나감). discovery 결과 리스트의 중첩 `verticalScroll`은 제거(이제 스크롤 body 안이라 이중 스크롤).
+- **검증 (에뮬레이터 `Pixel_8`, 실제 `127.0.0.1:3080` 백엔드, geometry는 `uiautomator dump`로 측정)**:
+  - 빈 폼으로 열기 → **Cancel/Save가 `y=1933–1976`에 정상 표시**(화면 2400).
+  - **모델 행 5개 추가**(content가 `y=2062` 너머로 증가) → **Save가 `y=2185–2228`로 여전히 화면 안**.
+  - body 스크롤 → Protocol이 897→532로 이동, 아래에 두 번째 모델 행의 **Remove model**·**Add model** 노출. **그 사이 Cancel/Save는 `[95,2185][205,2228]`/`[907,2185][985,2228]`에서 좌표 불변** = footer가 스크롤 영역 밖에 고정됨을 증명.
+  - 짧은 시트(Commands) → content 크기에 맞춰지고 스크롤 정상, 중첩 bounded 리스트로 인한 `IllegalStateException`(infinite constraints) **없음**.
+  - 크래시 0건(`logcat` FATAL/AndroidRuntime 무검출), 앱 생존. 유닛 테스트 **160건(앱 98 + 코어 62) 전부 그린**.
+- **남은 한계(의도적 미수정)**: (a) `SheetCommands`는 이제 **2단계 스크롤**(내부 bounded `LazyColumn` 2개가 새 스크롤 body 안) — 기능 정상, UX만 어색; (b) `ModelRowsEditor`가 행당 `weight(1f)` 필드 2개 + 제거 버튼이 실패 라인과 같은 행 → 좁은 폰에서 빡빡(1열 재배치 후보); (c) 나머지 시트(`SheetPresets`/`SheetSubagents`/`SheetPermission` 등)는 primitive 덕에 이제 스크롤되지만 **개별 실기 점검은 미실시**.
+- **주의(사용자 환경)**: 설정 화면에 "Settings are read-only over the network"가 뜨는 것은 하네스가 `--allow-privileged-remote` 없이 실행 중이라 **쓰기(403)가 거부**되기 때문. 버튼은 이제 눌리지만 저장은 그 플래그가 있어야 성공한다.
+
